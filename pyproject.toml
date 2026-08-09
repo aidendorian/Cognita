@@ -1,0 +1,14 @@
+[project]
+name = "researchagent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dotenv>=0.9.9",
+    "google-genai>=2.16.0",
+    "ipykernel>=7.3.0",
+    "langgraph>=1.2.8",
+    "psycopg>=3.3.4",
+    "pydantic-settings>=2.14.2",
+]
