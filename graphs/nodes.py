@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-
+from rag.retriever import retrieve
 from graphs.state import State
 from app.llm import LLM, mask
 
@@ -12,7 +12,6 @@ def _append_message(state: State, role: str, content: str) -> list[dict]:
     messages = list(state.get("messages") or [])
     messages.append({"role": role, "content": content})
     return messages
-
 
 def _scan_outputs(project_id: int) -> str:
     output_dir = Path(f"data/projects/{project_id}/outputs")
@@ -110,29 +109,34 @@ def planner(state: State) -> dict:
         ),
     }
 
-
-# ── researcher ────────────────────────────────────────────────────────────────
-
 def researcher(state: State) -> dict:
+    chunks = retrieve(str(state["current_step"]), project_id=state["project_id"], top_k=5)
+    
+    context = "\n\n".join(f"[Source: {c['source']}]\n{c['chunk_text']}" for c in chunks) if chunks else "No relevant documents found in knowledge base."
+
     prompt = f"""
-You are a research specialist agent. Your job is to find, synthesize, and report on
-information relevant to the current task.
+    You are a research specialist agent.
 
-OVERALL GOAL  : {state["task"]}
-CURRENT TASK  : {state["current_step"]}
+    OVERALL GOAL  : {state["task"]}
+    CURRENT TASK  : {state["current_step"]}
 
-PRIOR RESEARCH (build on this, do not repeat it):
-{mask(state.get("research_output"), limit=2000)}
+    RETRIEVED CONTEXT FROM KNOWLEDGE BASE:
+    {context}
 
-Produce a comprehensive research report covering:
-1. Key concepts and definitions
-2. Current state of knowledge — important findings, methods, models
-3. Relevant papers, authors, or sources (cite what you know)
-4. Open questions and known gaps in the literature
-5. Technical details relevant to the overall goal
+    PRIOR RESEARCH (build on this, do not repeat it):
+    {mask(state.get("research_output"), limit=2000)}
 
-Write clearly and thoroughly. This output will be read by an analyst and a writer.
-"""
+    Using the retrieved context above as your primary source, produce a comprehensive 
+    research report covering:
+    1. Key concepts and definitions
+    2. Current state of knowledge — important findings, methods, models
+    3. Relevant papers, authors, or sources (cite from the retrieved context)
+    4. Open questions and known gaps
+    5. Technical details relevant to the overall goal
+
+    Prioritize information from the retrieved context over general knowledge.
+    Write clearly and thoroughly.
+    """
     response = llm.generate(prompt)
     summary = llm.summarize(str(response))
 
