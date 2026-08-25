@@ -29,17 +29,7 @@ def _bm25_search(cur, query: str, project_id: int, top_k: int) -> list[tuple]:
     )
     return cur.fetchall()
 
-def _rrf(
-    vector_rows: list[tuple],
-    bm25_rows: list[tuple],
-    top_k: int,
-    k: int = 60,
-) -> list[dict]:
-    """
-    Reciprocal Rank Fusion — combines two ranked lists into one.
-    score = sum of 1/(rank + k) across both lists.
-    k=60 is the standard constant that dampens very high ranks.
-    """
+def _rrf(vector_rows: list[tuple], bm25_rows: list[tuple], top_k: int, k: int = 60) -> list[dict]:
     scores: dict[int, float] = {}
     texts: dict[int, str] = {}
     sources: dict[int, str] = {}
