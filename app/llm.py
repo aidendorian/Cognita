@@ -1,6 +1,7 @@
 import time
 from google.genai import Client
 from config.env import api_key, llm_model
+from google.genai.types import GenerateContentConfig
 
 def mask(text: str | None, limit: int = 1500) -> str:
     if not text:
@@ -14,11 +15,14 @@ class LLM:
         self.client = Client(api_key=api_key)
         self.model = llm_model
 
-    def generate(self, prompt: str, retries: int = 3):
+    def generate(self, prompt: str, retries: int = 3, max_output_tokens: int = 8192):
         for attempt in range(retries):
             try:
                 response = self.client.models.generate_content(model=self.model,
-                                                               contents=prompt)
+                                                               contents=prompt,
+                                                               config=GenerateContentConfig(
+                                                                   max_output_tokens=max_output_tokens
+                                                               ))
                 return response.text
             except Exception as e:
                 if attempt == retries - 1:
@@ -27,7 +31,7 @@ class LLM:
                 print(f"[LLM] attempt {attempt + 1} failed ({e}), retrying in {wait}s...")
                 time.sleep(wait)
 
-    def summarize(self, content: str, max_words: int = 200):
+    def summarize(self, content: str, max_words: int = 500):
         prompt = f"""
         Summarize the following content in under {max_words} words.
         
@@ -37,4 +41,4 @@ class LLM:
 
         Content:{content}
         """
-        return self.generate(prompt)
+        return self.generate(prompt, max_output_tokens=1000)

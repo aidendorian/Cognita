@@ -6,7 +6,7 @@ from app.llm import LLM, mask
 
 llm = LLM()
 VALID_AGENTS = {"researcher", "coder", "analyst", "writer", "reviewer", "end"}
-MAX_REVISIONS = 3
+MAX_REVISIONS = 2
 
 def _append_message(state: State, role: str, content: str) -> list[dict]:
     messages = list(state.get("messages") or [])
@@ -42,23 +42,23 @@ def planner(state: State) -> dict:
 
     AVAILABLE AGENTS:
     - researcher : finds information, reads papers, does literature reviews, summarizes sources
-    - coder      : writes and runs Python code, analyzes datasets, produces visualizations
-    - analyst    : interprets findings, draws conclusions, identifies patterns and gaps
-    - writer     : produces well-structured markdown reports and research documents
-    - reviewer   : checks drafts for accuracy, missing citations, hallucinations, logical gaps
-    - end        : use only when the task is fully complete and output is reviewed and ready
+    - coder : writes and runs Python code, analyzes datasets, produces visualizations
+    - analyst : interprets findings, draws conclusions, identifies patterns and gaps
+    - writer : produces well-structured markdown reports and research documents
+    - reviewer : checks drafts for accuracy, missing citations, hallucinations, logical gaps
+    - end : use only when the task is fully complete and output is reviewed and ready
 
     CURRENT STATE:
-    - Plan so far      : {state["plan"]}
-    - Last step run    : {state["current_step"]}
-    - Last status      : {state["status"]}
-    - Research done    : {"yes" if state.get("research_summary") else "no"}
-    - Code run         : {"yes" if state.get("code_result") else "no"}
-    - Analysis done    : {"yes" if state.get("analysis_summary") else "no"}
-    - Draft exists     : {"yes" if state.get("draft") else "no"}
-    - Review notes     : {mask(state.get("review_notes"), limit=400) if state.get("review_notes") else "none"}
-    - Output files     : {_scan_outputs(state["project_id"])}
-    - Revision count   : {state.get("revision_count", 0)} of {MAX_REVISIONS} max
+    - Plan so far : {state["plan"]}
+    - Last step run : {state["current_step"]}
+    - Last status : {state["status"]}
+    - Research done : {"yes" if state.get("research_summary") else "no"}
+    - Code run : {"yes" if state.get("code_result") else "no"}
+    - Analysis done : {"yes" if state.get("analysis_summary") else "no"}
+    - Draft exists : {"yes" if state.get("draft") else "no"}
+    - Review notes : {mask(state.get("review_notes"), limit=400) if state.get("review_notes") else "none"}
+    - Output files : {_scan_outputs(state["project_id"])}
+    - Revision count : {state.get("revision_count", 0)} of {MAX_REVISIONS} max
 
     INSTRUCTIONS:
     - Look at what has been completed before deciding the next step.
@@ -76,7 +76,7 @@ def planner(state: State) -> dict:
         "next_agent": "exactly one of: researcher, coder, analyst, writer, reviewer, end"
     }}
     """
-    response = llm.generate(prompt)
+    response = llm.generate(prompt, max_output_tokens=1000)
     raw = str(response).strip()
 
     if raw.startswith("```"):
@@ -117,8 +117,8 @@ def researcher(state: State) -> dict:
     prompt = f"""
     You are a research specialist agent.
 
-    OVERALL GOAL  : {state["task"]}
-    CURRENT TASK  : {state["current_step"]}
+    OVERALL GOAL : {state["task"]}
+    CURRENT TASK : {state["current_step"]}
 
     RETRIEVED CONTEXT FROM KNOWLEDGE BASE:
     {context}
@@ -137,7 +137,7 @@ def researcher(state: State) -> dict:
     Prioritize information from the retrieved context over general knowledge.
     Write clearly and thoroughly.
     """
-    response = llm.generate(prompt)
+    response = llm.generate(prompt, max_output_tokens=4096)
     summary = llm.summarize(str(response))
 
     return {
@@ -151,14 +151,14 @@ def coder(state: State) -> dict:
     prompt = f"""
     You are an expert Python coding agent. You write clean, correct, well-commented Python code.
 
-    OVERALL GOAL  : {state["task"]}
-    CURRENT TASK  : {state["current_step"]}
+    OVERALL GOAL : {state["task"]}
+    CURRENT TASK : {state["current_step"]}
 
     CONTEXT:
     - Research summary : {mask(state.get("research_summary"), limit=800)}
     - Analysis summary : {mask(state.get("analysis_summary"), limit=800)}
-    - Previous code    : {mask(state.get("code_output"), limit=1000)}
-    - Previous result  : {mask(state.get("code_result"), limit=600)}
+    - Previous code : {mask(state.get("code_output"), limit=1000)}
+    - Previous result : {mask(state.get("code_result"), limit=600)}
 
     If previous code failed (check previous result for errors), fix the specific error.
     If no previous code exists, write fresh code for the current task.
@@ -203,13 +203,13 @@ def analyst(state: State) -> dict:
     You are an expert analyst agent. You interpret research findings, code results, and data
     to produce actionable insights and conclusions.
 
-    OVERALL GOAL  : {state["task"]}
-    CURRENT TASK  : {state["current_step"]}
+    OVERALL GOAL : {state["task"]}
+    CURRENT TASK : {state["current_step"]}
 
     INPUTS TO ANALYZE:
     - Full research findings : {mask(state.get("research_output"), limit=2000)}
-    - Code execution result  : {mask(state.get("code_result"), limit=800)}
-    - Previous analysis      : {mask(state.get("analysis"), limit=800)}
+    - Code execution result : {mask(state.get("code_result"), limit=800)}
+    - Previous analysis : {mask(state.get("analysis"), limit=800)}
 
     Produce a thorough analysis covering:
     1. Key patterns and insights from the research
@@ -220,7 +220,7 @@ def analyst(state: State) -> dict:
 
     Be specific. Avoid vague statements. This analysis directly shapes the final report.
     """
-    response = llm.generate(prompt)
+    response = llm.generate(prompt, max_output_tokens=4096)
     summary = llm.summarize(str(response))
 
     return {
@@ -237,25 +237,30 @@ def writer(state: State) -> dict:
     You are an expert research writing agent. You produce clear, well-structured,
     original research documents in markdown format.
 
-    OVERALL GOAL  : {state["task"]}
-    CURRENT TASK  : {state["current_step"]}
-    REVISION      : {revision_count} of {MAX_REVISIONS} allowed
+    OVERALL GOAL : {state["task"]}
+    CURRENT TASK : {state["current_step"]}
+    REVISION : {revision_count} of {MAX_REVISIONS} allowed
 
     CONTENT TO DRAW FROM:
-    - Research summary   : {mask(state.get("research_summary"), limit=1000)}
-    - Analysis summary   : {mask(state.get("analysis_summary"), limit=1000)}
-    - Code result        : {mask(state.get("code_result"), limit=600)}
-    - Output files       : {_scan_outputs(state["project_id"])}
-    - Previous draft     : {mask(state.get("draft"), limit=1500)}
-    - Reviewer feedback  : {state.get("review_notes") or "None yet — first draft."}
+    - Research summary : {mask(state.get("research_summary"), limit=1000)}
+    - Analysis summary : {mask(state.get("analysis_summary"), limit=1000)}
+    - Code result : {mask(state.get("code_result"), limit=600)}
+    - Output files : {_scan_outputs(state["project_id"])}
+    - Previous draft : {state.get("draft") or "None yet."}
+    - Reviewer feedback : {state.get("review_notes") or "None yet — first draft."}
 
     INSTRUCTIONS:
-    - If reviewer feedback exists, address EVERY point raised before anything else.
-    - If no previous draft exists, write from scratch using the research and analysis.
-    - Focus on originality, logical flow, and well-supported claims.
-    - Every significant claim must be traceable to the research or analysis above.
-    - Reference any output files by name where relevant (e.g. "see chart.png").
-    - Use clear headings, subheadings, bullet points or tables where appropriate.
+    - If reviewer feedback exists, this is a REVISION — read every numbered point carefully
+    - Fix ONLY the exact sections mentioned — reproduce everything else unchanged
+    - For mathematical notation: ensure subscripts and operations are consistent throughout
+    - After fixes, add at the very top before the title:
+        Revision {revision_count}: Fixed [list exactly what you fixed]
+    - Then reproduce the COMPLETE document with fixes applied
+    - If no reviewer feedback, write from scratch using research and analysis
+    - Every significant claim must be traceable to the research or analysis above
+    - Reference output files by name where relevant
+    - Use clear headings, subheadings, bullet points or tables
+    Return ONLY valid markdown. No preamble, no commentary outside the document.
 
     Return ONLY valid markdown. No preamble, no commentary outside the document.
     """
@@ -289,17 +294,25 @@ def reviewer(state: State) -> dict:
     You are an expert reviewer agent. You critically evaluate research drafts for quality,
     accuracy, and completeness before they are finalized.
 
-    OVERALL GOAL  : {state["task"]}
-    CURRENT TASK  : {state["current_step"]}
-    REVISION      : {revision_count} of {MAX_REVISIONS} max (auto-approve at limit)
+    OVERALL GOAL : {state["task"]}
+    CURRENT TASK : {state["current_step"]}
+    REVISION : {revision_count} of {MAX_REVISIONS} max (auto-approve at limit)
 
     MATERIALS TO REVIEW:
-    - Draft            : {mask(state.get("draft"), limit=3000)}
+    - Draft : {state.get("draft") or "No draft yet."}
     - Research summary : {mask(state.get("research_summary"), limit=600)}
     - Analysis summary : {mask(state.get("analysis_summary"), limit=600)}
-    - Code result      : {mask(state.get("code_result"), limit=400)}
-    - Output files     : {_scan_outputs(state["project_id"])}
-    - Prior notes      : {mask(state.get("review_notes"), limit=400) or "None — first review."}
+    - Code result : {mask(state.get("code_result"), limit=400)}
+    - Output files : {_scan_outputs(state["project_id"])}
+    - Prior notes : {mask(state.get("review_notes"), limit=400) or "None — first review."}
+    
+    CONTEXT:
+    - This is a research summary report, not a peer-reviewed journal submission
+    - Approve if the document is substantially correct, complete, and addresses the task
+    - Only flag genuinely wrong facts or broken logic — not stylistic preferences
+    - Mathematical notation only needs to be internally consistent, not publication-perfect
+    - If the writer addressed the previous revision notes, do not re-flag the same issues
+    - When in doubt, APPROVE — a good summary is better than an infinite revision loop
 
     CHECK FOR:
     1. Unsupported claims — facts not grounded in the research or analysis
@@ -315,7 +328,7 @@ def reviewer(state: State) -> dict:
     - If NEEDS REVISION: numbered list of specific issues — each actionable,
     no vague feedback like "improve clarity"
     """
-    response = llm.generate(prompt)
+    response = llm.generate(prompt, max_output_tokens=4096)
     approved = str(response).strip().upper().startswith("APPROVED")
 
     return {
