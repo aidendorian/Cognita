@@ -60,7 +60,7 @@ def _rrf(vector_rows: list[tuple], bm25_rows: list[tuple], top_k: int, k: int = 
 def retrieve(query: str, project_id: int, top_k: int = 5) -> list[dict]:
     query_vector = embed_text(query, task_type="RETRIEVAL_QUERY")
 
-    with psycopg.connect(db_url) as conn:
+    with psycopg.connect(db_url) as conn: #type: ignore
         with conn.cursor() as cur:
             vector_rows = _vector_search(cur, query_vector, project_id, top_k * 2)
             bm25_rows = _bm25_search(cur, query, project_id, top_k * 2)

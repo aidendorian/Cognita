@@ -59,7 +59,7 @@ def _extract_pdf(path: str) -> str:
     return text
 
 def _store_chunks(chunks: list[str], project_id: int, source: str) -> int:
-    with psycopg.connect(db_url) as conn:
+    with psycopg.connect(db_url) as conn: #type: ignore
         with conn.cursor() as cur:
             for chunk in chunks:
                 vector = embed_text(chunk, task_type="RETRIEVAL_DOCUMENT")
