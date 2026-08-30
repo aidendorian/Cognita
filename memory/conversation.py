@@ -12,31 +12,29 @@ def create_chat(project_id: int) -> int:
         conn.commit()
     return chat_id
 
-def save_messages(chat_id: int, messages: list[dict]) -> None:
-
+def save_messages(chat_id: int, messages: list) -> None:
     if not messages:
         return
-
-    with psycopg.connect(db_url) as conn: 
+    with psycopg.connect(db_url) as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM messages WHERE chat_id = %s", (chat_id,))
-
             for msg in messages:
-                role = msg.get("role", "assistant")
-                content = msg.get("content", "")
+                if hasattr(msg, "type"):
+                    role = "user" if msg.type == "human" else "assistant"
+                    content = msg.content
+                else:
+                    role = msg.get("role", "assistant")
+                    content = msg.get("content", "")
                 if content:
                     cur.execute(
-                        """
-                        INSERT INTO messages (chat_id, role, content)
-                        VALUES (%s, %s, %s)
-                        """,
+                        "INSERT INTO messages (chat_id, role, content) VALUES (%s, %s, %s)",
                         (chat_id, role, content),
                     )
         conn.commit()
 
 
 def load_messages(chat_id: int) -> list[dict]:
-    with psycopg.connect(db_url) as conn:
+    with psycopg.connect(db_url) as conn: #type: ignore
         with conn.cursor() as cur:
             cur.execute(
                 """
