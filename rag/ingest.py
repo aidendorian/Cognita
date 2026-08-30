@@ -74,13 +74,16 @@ def _store_chunks(chunks: list[str], project_id: int, source: str) -> int:
         conn.commit()
     return len(chunks)
 
-def ingest(source: str, project_id: int, source_type: str = "auto") -> int:
+def ingest(source: str, project_id: int, source_label:str | None = None, source_type: str = "auto") -> int:
     if source_type == "auto":
         source_type = _detect_type(source)
 
-    if source_type == "url":
+    if source_type == "url" and source_label is None:
         text = _extract_url(source)
         label = source
+    elif source_type == "url" and source_label is not None:
+        text = source
+        label = source_label
     elif source_type == "pdf":
         text = _extract_pdf(source)
         label = source
