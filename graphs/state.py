@@ -24,3 +24,6 @@ class State(TypedDict):
     analysis_summary: Optional[str]
     revision_count: Optional[int]
     messages: Annotated[list, add_messages]
+    
+    novelty_report: Optional[str]
+    task_mode: Optional[str]
