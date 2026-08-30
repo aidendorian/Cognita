@@ -11,9 +11,11 @@ dependencies = [
     "ipykernel>=7.3.0",
     "langgraph>=1.2.8",
     "langgraph-checkpoint-postgres>=3.1.2",
+    "openai>=3.5.0",
     "paddleocr>=3.7.0",
     "paddlepaddle>=3.3.1",
     "psycopg>=3.3.4",
     "pydantic-settings>=2.14.2",
+    "tavily-python>=0.8.0",
     "trafilatura>=2.2.0",
 ]
