@@ -1,7 +1,6 @@
 import json
 import psycopg
 import trafilatura
-
 from config.env import db_url
 from rag.chunking import chunk_text
 from rag.embeddings import embed_text
@@ -58,9 +57,18 @@ def _extract_pdf(path: str) -> str:
         raise ValueError(f"PaddleOCR extracted no text from: {path}")
     return text
 
-def _store_chunks(chunks: list[str], project_id: int, source: str) -> int:
-    with psycopg.connect(db_url) as conn: #type: ignore
+def _store_chunks(chunks: list[str], project_id: int, source: str, force: bool = False) -> int:
+    with psycopg.connect(db_url) as conn:
         with conn.cursor() as cur:
+            if not force:
+                cur.execute(
+                    "SELECT COUNT(*) FROM embeddings WHERE project_id = %s AND source = %s",
+                    (project_id, source),
+                )
+                if cur.fetchone()[0] > 0: #type: ignore
+                    print(f"[ingest] skipping {source!r} — already ingested for project {project_id}")
+                    return 0
+            
             for chunk in chunks:
                 vector = embed_text(chunk, task_type="RETRIEVAL_DOCUMENT")
                 vector_str = json.dumps(vector)
@@ -74,7 +82,7 @@ def _store_chunks(chunks: list[str], project_id: int, source: str) -> int:
         conn.commit()
     return len(chunks)
 
-def ingest(source: str, project_id: int, source_label:str | None = None, source_type: str = "auto") -> int:
+def ingest(source: str, project_id: int, source_label:str | None = None, source_type: str = "auto", force: bool = False) -> int:
     if source_type == "auto":
         source_type = _detect_type(source)
 
