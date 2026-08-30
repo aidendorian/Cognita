@@ -11,7 +11,9 @@ class ValidateENV(BaseSettings):
     db_username: str = Field(..., validation_alias="DATABASE_USERNAME", min_length=1)
     db_password: str = Field(..., validation_alias="DATABASE_PASSWORD", min_length=1)
     db_name: str = Field(..., validation_alias="DATABASE_NAME", min_length=1)
-
+    llm_backend: str = Field(..., validation_alias="LLM_BACKEND", min_length=1)
+    tavily_key: str = Field(..., validation_alias="TAVILY_API_KEY", min_length=1)
+    
     @property
     def db_url(self) -> str:
         return f"postgresql://{self.db_username}:{self.db_password}@localhost:5432/{self.db_name}"
@@ -34,3 +36,5 @@ except ValidationError as e:
 api_key = validate.api_key
 llm_model = validate.llm_model
 db_url = validate.db_url
+llm_backend = validate.llm_backend
+tavily_key = validate.tavily_key
