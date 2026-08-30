@@ -3,6 +3,16 @@ from abc import ABC, abstractmethod
 from google.genai import Client
 from google.genai.types import GenerateContentConfig
 from config.env import api_key, llm_model, llm_backend
+import httpx
+
+RETRYABLE_EXCEPTIONS = (
+    TimeoutError,
+    ConnectionError,
+    httpx.TimeoutException,
+    httpx.NetworkError,
+)
+
+RETRYABLE_HTTP_CODES = {429, 500, 502, 503}
 
 def mask(text: str | None, limit: int = 1500) -> str:
     if not text:
@@ -86,7 +96,11 @@ class LLM:
             try:
                 return self._backend.generate(prompt, max_output_tokens=max_output_tokens)
             except Exception as e:
-                if attempt == retries - 1:
+                is_retryable = isinstance(e, RETRYABLE_EXCEPTIONS)
+                if not is_retryable:
+                    msg = str(e).lower()
+                    is_retryable = any(str(code) in msg for code in RETRYABLE_HTTP_CODES)
+                if not is_retryable or attempt == retries - 1:
                     raise
                 wait = 2 ** attempt
                 print(f"[LLM] attempt {attempt + 1} failed ({e}), retrying in {wait}s...")
