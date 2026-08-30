@@ -4,12 +4,12 @@ MAX_READ_BYTES = 10 * 1024 * 1024
 
 class FileSystem:
     def __init__(self, project_id: int):
-        self.base_path = Path(f"data/projects/{project_id}")
+        self.base_path = Path(f"data/projects/{project_id}").resolve()
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def _resolve_path(self, target: str) -> Path:
         full_path = (self.base_path / target).resolve()
-        if not full_path.is_relative_to(self.base_path.resolve()):
+        if not full_path.is_relative_to(self.base_path):
             raise ValueError(f"Path escapes project root: {target!r}")
         return full_path
 
