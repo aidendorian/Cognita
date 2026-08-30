@@ -3,15 +3,49 @@ from pathlib import Path
 from rag.retriever import retrieve
 from graphs.state import State
 from app.llm import LLM, mask
+from tools.filesystem import FileSystem
+from memory.project import load_project_memory
+from memory.summaries import format_prior_memory
+from rag.ingest import ingest
+from tools.python_exec import PythonSandbox
+from tools.search import search as web_search
+from pathlib import Path
+import re
 
 llm = LLM()
 VALID_AGENTS = {"researcher", "coder", "analyst", "writer", "reviewer", "end"}
 MAX_REVISIONS = 2
 
-def _append_message(state: State, role: str, content: str) -> list[dict]:
-    messages = list(state.get("messages") or [])
-    messages.append({"role": role, "content": content})
-    return messages
+def _multi_retrieve(queries: list[str], project_id: int, top_k: int = 5) -> list[dict]:
+    seen = set()
+    results = []
+    for query in queries:
+        if not query:
+            continue
+        for chunk in retrieve(query, project_id=project_id, top_k=top_k):
+            if chunk["chunk_id"] not in seen:
+                seen.add(chunk["chunk_id"])
+                results.append(chunk)
+    return sorted(results, key=lambda x: x["score"], reverse=True)[:top_k * 2]
+
+def _extract_json(text: str) -> dict:
+    try:
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    raise json.JSONDecodeError("No valid JSON found", text, 0)
 
 def _scan_outputs(project_id: int) -> str:
     output_dir = Path(f"data/projects/{project_id}/outputs")
@@ -21,11 +55,8 @@ def _scan_outputs(project_id: int) -> str:
     return ", ".join(files) if files else "None."
 
 def entry(state: State) -> dict:
-    messages = list(state.get("messages") or [])
-    if not messages:
-        messages.append({"role": "user", "content": state["task"]})
     return {
-        "messages": messages,
+        "messages": [{"role": "user", "content": state["task"]}],
         "revision_count": 0,
         "status": "running",
     }
@@ -35,6 +66,7 @@ def planner(state: State) -> dict:
         return {"next_agent": "end", "status": "complete"}
 
     prompt = f"""
+    CRITICAL: Respond with ONLY a JSON object. No explanation, no markdown, no text before or after. Start your response with {{ and end with }}.
     You are a research planning agent. Your job is to break down a task into clear steps
     and decide which specialist agent should act next based on what has already been done.
 
@@ -76,23 +108,16 @@ def planner(state: State) -> dict:
         "next_agent": "exactly one of: researcher, coder, analyst, writer, reviewer, end"
     }}
     """
-    response = llm.generate(prompt, max_output_tokens=1000)
-    raw = str(response).strip()
-
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-
+    response = llm.generate(prompt, max_output_tokens=8196)
     try:
-        data = json.loads(raw.strip())
+        data = _extract_json(str(response))
     except json.JSONDecodeError:
         return {
             "plan": [],
             "current_step": "planning failed — could not parse LLM response",
             "next_agent": "end",
             "status": "failed",
-            "messages": _append_message(state, "assistant", "[planner] failed to parse plan"),
+            "messages": [{"role": "assistant", "content": "[planner] failed to parse plan"}],
         }
 
     if data.get("next_agent") not in VALID_AGENTS:
@@ -103,16 +128,32 @@ def planner(state: State) -> dict:
         "current_step": data["current_step"],
         "next_agent": data["next_agent"],
         "status": "running",
-        "messages": _append_message(
-            state, "assistant",
-            f"[planner] next: {data['next_agent']} — {data['current_step']}"
-        ),
+        "messages": [{"role": "assistant", "content": f"[planner] next: {data['next_agent']} — {data['current_step']}"}],
     }
 
 def researcher(state: State) -> dict:
-    chunks = retrieve(str(state["current_step"]), project_id=state["project_id"], top_k=5)
     
-    context = "\n\n".join(f"[Source: {c['source']}]\n{c['chunk_text']}" for c in chunks) if chunks else "No relevant documents found in knowledge base."
+    prior = load_project_memory(state["project_id"])    
+    prior_context = format_prior_memory(prior, limit_per_item=300)
+    
+    chunks = _multi_retrieve(
+        queries=[str(state["current_step"]),
+                str(state["task"]),
+                mask(state.get("research_summary", ""), limit=200),],project_id=state["project_id"]
+    )
+    
+    search_results = []
+    try:
+        search_results = web_search(
+            query=str(state["current_step"]),
+            project_id=state["project_id"],
+            max_results=3
+        )
+    except Exception as e:
+        print(f"[researcher] web search failed: {e}")
+    web_context = "\n\n".join(f"[Web: {r.get('url', '')}]\n{r.get('content', '')[:300]}" for r in search_results) if search_results else "No web results."
+    
+    context = "\n\n".join(f"[Source: {c['source']}]\n{c['chunk_text'][:300]}" for c in chunks) if chunks else "No relevant documents found in knowledge base."
 
     prompt = f"""
     You are a research specialist agent.
@@ -123,9 +164,15 @@ def researcher(state: State) -> dict:
     RETRIEVED CONTEXT FROM KNOWLEDGE BASE:
     {context}
 
-    PRIOR RESEARCH (build on this, do not repeat it):
-    {mask(state.get("research_output"), limit=2000)}
+    FRESH WEB SEARCH RESULTS:
+    {web_context}
 
+    PRIOR RESEARCH (build on this, do not repeat it):
+    {mask(state.get("research_output"), limit=1000)}
+    
+    ACCUMULATED KNOWLEDGE FROM PRIOR SESSIONS:
+    {prior_context if prior_context else "No prior sessions yet — this is the first run."}
+    
     Using the retrieved context above as your primary source, produce a comprehensive 
     research report covering:
     1. Key concepts and definitions
@@ -137,14 +184,14 @@ def researcher(state: State) -> dict:
     Prioritize information from the retrieved context over general knowledge.
     Write clearly and thoroughly.
     """
-    response = llm.generate(prompt, max_output_tokens=4096)
-    summary = llm.summarize(str(response))
+    response = llm.generate(prompt, max_output_tokens=8196)
+    summary = llm.summarize(str(response), max_words=8196) #or mask(str(response), limit=1500)
 
     return {
         "research_output": response,
         "research_summary": summary,
         "status": "running",
-        "messages": _append_message(state, "assistant", f"[researcher] {summary}"),
+        "messages": [{"role": "assistant", "content": f"[researcher] {summary}"}],
     }
 
 def coder(state: State) -> dict:
@@ -171,34 +218,75 @@ def coder(state: State) -> dict:
 
     Return ONLY raw Python code. No markdown fences, no explanation outside comments.
     """
-    response = llm.generate(prompt)
+    
+    MAX_CODE_RETRIES = 3
 
-    from tools.python_exec import PythonSandbox
+    code = str(llm.generate(prompt, max_output_tokens=8192))
     sandbox = PythonSandbox(project_id=state["project_id"])
-    execution = sandbox.run(str(response))
+    execution = sandbox.run(code)
 
+    attempt = 0
+    while not execution["success"] and attempt < MAX_CODE_RETRIES:
+        attempt += 1
+        fix_prompt = f"""
+        This Python code failed. Fix the specific error and return ONLY corrected Python code.
+
+        ATTEMPT: {attempt} of {MAX_CODE_RETRIES}
+        ERROR:
+        {execution['stderr'][:800]}
+
+        FAILING CODE:
+        {code}
+
+        Return ONLY raw Python code. No markdown, no explanation.
+        """
+        
+        code = str(llm.generate(fix_prompt, max_output_tokens=8192))
+        execution = sandbox.run(code)
+    
     output_files = _scan_outputs(state["project_id"])
-
+    outputs_path = Path(f"data/projects/{state['project_id']}/outputs")
+    if outputs_path.exists():
+        for file in outputs_path.iterdir():
+            if file.suffix in (".csv", ".txt", ".json", ".md"):
+                try:
+                    ingest(str(file), project_id=state["project_id"], source_type="text")
+                except Exception as e:
+                    print(f"[coder] failed to ingest {file.name}: {e}")
+                    
     if execution["success"]:
         result = (
-            f"Code ran successfully.\n"
+            f"Code ran successfully after {attempt} fix(es).\n"
             f"Output:\n{execution['stdout']}\n"
-            f"Files generated: {output_files}"
+            f"Files: {output_files}"
         )
     else:
         result = (
-            f"Code failed (exit {execution['returncode']}).\n"
-            f"Error:\n{execution['stderr']}"
+            f"Code failed after {MAX_CODE_RETRIES} attempts.\n"
+            f"Final error:\n{execution['stderr'][:500]}\n"
+            f"The planner will decide whether to retry or continue."
         )
 
     return {
-        "code_output": response,
+        "code_output": code,
         "code_result": result,
         "status": "running",
-        "messages": _append_message(state, "assistant", f"[coder] {result[:200]}"),
+        "messages": [{"role": "assistant", "content": f"[coder] {result[:200]}"}],
     }
 
 def analyst(state: State) -> dict:
+    prior = load_project_memory(state["project_id"])
+    prior_context = format_prior_memory(prior)
+    fs = FileSystem(project_id=state["project_id"])
+    csv_content = ""
+    for f in fs.list_files("outputs"):
+        if f.endswith(".csv"):
+            try:
+                content = fs.read(f)
+                csv_content += f"\n[{f}]\n{content[:1500]}"
+            except Exception:
+                pass
+    
     prompt = f"""
     You are an expert analyst agent. You interpret research findings, code results, and data
     to produce actionable insights and conclusions.
@@ -210,7 +298,11 @@ def analyst(state: State) -> dict:
     - Full research findings : {mask(state.get("research_output"), limit=2000)}
     - Code execution result : {mask(state.get("code_result"), limit=800)}
     - Previous analysis : {mask(state.get("analysis"), limit=800)}
+    - CSV data files: {csv_content or "None."}
 
+    ACCUMULATED KNOWLEDGE FROM PRIOR SESSIONS:
+    {prior_context if prior_context else "No prior sessions yet — this is the first run."}
+    
     Produce a thorough analysis covering:
     1. Key patterns and insights from the research
     2. What the code output reveals (if available) — interpret numbers, charts, results
@@ -220,14 +312,14 @@ def analyst(state: State) -> dict:
 
     Be specific. Avoid vague statements. This analysis directly shapes the final report.
     """
-    response = llm.generate(prompt, max_output_tokens=4096)
-    summary = llm.summarize(str(response))
+    response = llm.generate(prompt, max_output_tokens=8196)
+    summary = llm.summarize(str(response)) or mask(str(response), limit=500)
 
     return {
         "analysis": response,
         "analysis_summary": summary,
         "status": "running",
-        "messages": _append_message(state, "assistant", f"[analyst] {summary}"),
+        "messages": [{"role": "assistant", "content": f"[analyst] {summary}"}],
     }
 
 def writer(state: State) -> dict:
@@ -261,19 +353,17 @@ def writer(state: State) -> dict:
     - Reference output files by name where relevant
     - Use clear headings, subheadings, bullet points or tables
     Return ONLY valid markdown. No preamble, no commentary outside the document.
-
-    Return ONLY valid markdown. No preamble, no commentary outside the document.
     """
     response = llm.generate(prompt)
-
+    fs = FileSystem(project_id=state["project_id"])
+    filename = f"outputs/draft_v{revision_count}.md"
+    fs.write(filename, str(response))
+    
     return {
         "draft": response,
         "revision_count": revision_count,
         "status": "running",
-        "messages": _append_message(
-            state, "assistant",
-            f"[writer] draft revision {revision_count} complete"
-        ),
+        "messages": [{"role": "assistant", "content": f"[writer] draft revision {revision_count} complete — saved to {filename}"}],
     }
 
 def reviewer(state: State) -> dict:
@@ -287,7 +377,7 @@ def reviewer(state: State) -> dict:
             "review_notes": note,
             "final_output": state.get("draft"),
             "status": "complete",
-            "messages": _append_message(state, "assistant", f"[reviewer] {note}"),
+            "messages": [{"role": "assistant", "content": f"[reviewer] {note}"}],
         }
 
     prompt = f"""
@@ -328,15 +418,14 @@ def reviewer(state: State) -> dict:
     - If NEEDS REVISION: numbered list of specific issues — each actionable,
     no vague feedback like "improve clarity"
     """
-    response = llm.generate(prompt, max_output_tokens=4096)
+    response = llm.generate(prompt, max_output_tokens=8196)
     approved = str(response).strip().upper().startswith("APPROVED")
-
+    if approved:
+        fs = FileSystem(project_id=state["project_id"])
+        fs.write("outputs/final_report.md", state.get("draft", "")) #type: ignore
     return {
         "review_notes": response,
         "final_output": state.get("draft") if approved else None,
         "status": "complete" if approved else "running",
-        "messages": _append_message(
-            state, "assistant",
-            f"[reviewer] {'APPROVED' if approved else 'NEEDS REVISION'}"
-        ),
+        "messages": [{"role": "assistant", "content": f"[reviewer] {'APPROVED' if approved else 'NEEDS REVISION'}"}],
     }
