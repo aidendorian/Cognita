@@ -13,6 +13,9 @@ class ValidateENV(BaseSettings):
     db_name: str = Field(..., validation_alias="DATABASE_NAME", min_length=1)
     llm_backend: str = Field(..., validation_alias="LLM_BACKEND", min_length=1)
     tavily_key: str = Field(..., validation_alias="TAVILY_API_KEY", min_length=1)
+    langfuse_public_key: str = Field(..., validation_alias="LANGFUSE_PUBLIC_KEY", min_length=1)
+    langfuse_secret_key: str = Field(..., validation_alias="LANGFUSE_SECRET_KEY", min_length=1)
+    langfuse_base_url: str = Field(..., validation_alias="LANGFUSE_BASE_URL", min_length=1)
     
     @property
     def db_url(self) -> str:
@@ -38,3 +41,6 @@ llm_model = validate.llm_model
 db_url = validate.db_url
 llm_backend = validate.llm_backend
 tavily_key = validate.tavily_key
+langfuse_public_key = validate.langfuse_public_key
+langfuse_secret_key = validate.langfuse_secret_key
+langfuse_base_url = validate.langfuse_base_url
