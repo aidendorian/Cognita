@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from google.genai import Client
 from google.genai.types import GenerateContentConfig
 from config.env import api_key, llm_model, llm_backend
+from observability.tracing import trace_llm_call
 import httpx
 
 RETRYABLE_EXCEPTIONS = (
@@ -47,6 +48,15 @@ class GeminiBackend(LLMBackend):
                 safety = getattr(candidates[0], 'safety_ratings', [])
                 raise ValueError(f"Gemini returned empty response. finish_reason={reason}, safety={safety}")
             raise ValueError("Gemini returned empty response")
+        
+        trace_llm_call(
+            name="gemini.generate",
+            prompt=prompt,
+            response=text,
+            model=self._model,
+            metadata={"max_output_tokens": max_output_tokens}
+        )
+        
         return text
 
 class LlamaServerBackend(LLMBackend):
@@ -75,6 +85,15 @@ class LlamaServerBackend(LLMBackend):
         text = response.choices[0].message.content
         if text is None:
             raise ValueError("Local model returned empty response")
+        
+        trace_llm_call(
+            name="llama.generate",
+            prompt=prompt,
+            response=text,
+            model="local",
+            metadata={"max_output_tokens": max_output_tokens}
+        )
+        
         return text
 
 class LLM:
