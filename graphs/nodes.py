@@ -9,12 +9,15 @@ from tools.semantic_scholar import search_papers
 from rag.ingest import ingest
 from tools.python_exec import PythonSandbox
 from tools.search import search as web_search
+from langfuse import observe
+from observability.langfuse import get_client
 from pathlib import Path
 import re
 
 llm = LLM()
 VALID_AGENTS = {"researcher", "coder", "analyst", "writer", "reviewer", "critic", "end"}
 MAX_REVISIONS = 2
+_ = get_client()
 
 def _multi_retrieve(queries: list[str], project_id: int, top_k: int = 5) -> list[dict]:
     seen = set()
@@ -47,23 +50,42 @@ def _extract_json(text: str) -> dict:
             pass
     raise json.JSONDecodeError("No valid JSON found", text, 0)
 
+def _validate_planner_output(data: dict) -> dict:
+    if not isinstance(data.get("plan"), list):
+        data["plan"] = [str(data["plan"])] if data.get("plan") else []
+
+    if not isinstance(data.get("current_step"), str) or not data["current_step"].strip():
+        data["current_step"] = data["plan"][0] if data["plan"] else "unknown step"
+
+    return data
+
 def _get_output_files(project_id: int) -> list[str]:
     output_dir = Path(f"data/projects/{project_id}/outputs")
     if not output_dir.exists():
         return []
     return [f.name for f in output_dir.iterdir() if f.is_file()]
 
+@observe(name="entry", capture_input=False, capture_output=False)
 def entry(state: State) -> dict:
     existing = state.get("messages") or []
     new_messages = []
     if not any(m.get("content") == state["task"] for m in existing if isinstance(m, dict)):
         new_messages.append({"role": "user", "content": state["task"]})
+        
+    _.update_current_span(
+        metadata={
+            "project_id": str(state["project_id"]),
+            "task_length": str(len(state["task"])),
+        }
+    )
+    
     return {
         "messages": new_messages,
         "revision_count": 0,
         "status": "running",
     }
     
+@observe(name="planner", capture_input=False, capture_output=False)
 def planner(state: State) -> dict:
     if state.get("final_output"):
         return {"next_agent": "end", "status": "complete"}
@@ -85,6 +107,7 @@ def planner(state: State) -> dict:
     - analyst : interprets findings, draws conclusions, identifies patterns and gaps
     - writer : produces well-structured markdown reports and research documents
     - reviewer : checks drafts for accuracy, missing citations, hallucinations, logical gaps
+    - critic : checks novelty against existing literature before paper writing begins
     - end : use only when the task is fully complete and output is reviewed and ready
 
     CURRENT STATE:
@@ -121,6 +144,7 @@ def planner(state: State) -> dict:
     response = llm.generate(prompt, max_output_tokens=8192)
     try:
         data = _extract_json(str(response))
+        data = _validate_planner_output(data)
     except json.JSONDecodeError:
         return {
             "plan": [],
@@ -145,7 +169,22 @@ def planner(state: State) -> dict:
         data["next_agent"] = "end"    
         
     if data.get("next_agent") not in VALID_AGENTS:
-        data["next_agent"] = "researcher"
+        return {
+            "plan": ["planner returned invalid agent — workflow ended safely"],
+            "current_step": "invalid agent returned by planner",
+            "next_agent": "end",
+            "status": "failed",
+            "messages": [{"role": "assistant", "content": "[planner] invalid agent returned — routing to end"}],
+        }
+        
+    _.update_current_span(
+        metadata={
+            "next_agent": str(data.get("next_agent", ""))[:200],
+            "current_step": str(data.get("current_step", ""))[:100],
+            "revision_count": str(state.get("revision_count", 0)),
+            "task_mode": str(task_mode),
+        }
+    )
 
     return {
         "plan": data["plan"],
@@ -155,6 +194,7 @@ def planner(state: State) -> dict:
         "messages": [{"role": "assistant", "content": f"[planner] next: {data['next_agent']} — {data['current_step']}"}],
     }
 
+@observe(name="researcher", capture_input=False, capture_output=False)
 def researcher(state: State) -> dict:
     prior = load_project_memory(state["project_id"])    
     prior_context = format_prior_memory(prior, limit_per_item=300)
@@ -213,6 +253,17 @@ def researcher(state: State) -> dict:
     """
     response = llm.generate(prompt, max_output_tokens=8192)
     summary = llm.summarize(str(response), max_words=1500) #or mask(str(response), limit=1500)
+    
+    _.update_current_span(
+        metadata={
+            "project_id": str(state["project_id"]),
+            "task": str(state["task"])[:100],
+            "chunks_retrieved": str(len(chunks)),
+            "web_results": str(len(search_results)),
+            "has_prior_research": str(bool(state.get("research_output"))),
+            "response_length": str(len(str(response))),
+        }
+    )
 
     return {
         "research_output": response,
@@ -221,6 +272,7 @@ def researcher(state: State) -> dict:
         "messages": [{"role": "assistant", "content": f"[researcher] {summary}"}],
     }
 
+@observe(name="coder", capture_input=False, capture_output=False)
 def coder(state: State) -> dict:
     prompt = f"""
     You are an expert Python coding agent. You write clean, correct, well-commented Python code.
@@ -285,6 +337,15 @@ def coder(state: State) -> dict:
             f"Final error:\n{execution['stderr'][:500]}\n"
             f"The planner will decide whether to retry or continue."
         )
+        
+    _.update_current_span(
+        metadata={
+            "execution_success": str(execution["success"]),
+            "attempt_count": str(attempt),
+            "files_generated": str(output_files)[:200],
+            "project_id": str(state["project_id"]),
+        }
+    )
 
     return {
         "code_output": code,
@@ -294,6 +355,7 @@ def coder(state: State) -> dict:
         "messages": [...],
     }
 
+@observe(name="analyst", capture_input=False, capture_output=False)
 def analyst(state: State) -> dict:
     prior = load_project_memory(state["project_id"])
     prior_context = format_prior_memory(prior)
@@ -344,6 +406,15 @@ def analyst(state: State) -> dict:
     """
     response = llm.generate(prompt, max_output_tokens=8192)
     summary = llm.summarize(str(response)) or mask(str(response), limit=500)
+    
+    _.update_current_span(
+        metadata={
+            "has_csv_data": str(bool(csv_content)),
+            "project_id": str(state["project_id"]),
+            "has_code_result": str(bool(state.get("code_result"))),
+            "response_length": str(len(str(response))),
+        }
+    )
 
     return {
         "analysis": response,
@@ -391,6 +462,15 @@ def writer(state: State) -> dict:
     filename = f"outputs/draft_v{revision_count}.md"
     fs.write(filename, str(response))
     
+    _.update_current_span(
+        metadata={
+            "revision_count": str(revision_count),
+            "draft_length": str(len(str(response))),
+            "has_reviewer_feedback": str(bool(state.get("review_notes"))),
+            "filename": str(filename),
+        }
+    )
+    
     return {
         "draft": response,
         "revision_count": revision_count,
@@ -398,18 +478,20 @@ def writer(state: State) -> dict:
         "messages": [{"role": "assistant", "content": f"[writer] draft revision {revision_count} complete — saved to {filename}"}],
     }
 
+@observe(name="reviewer", capture_input=False, capture_output=False)
 def reviewer(state: State) -> dict:
     revision_count = state.get("revision_count") or 0
     if revision_count >= MAX_REVISIONS:
         note = (
-            f"AUTO-APPROVED after {MAX_REVISIONS} revision cycles. "
-            "Draft accepted as-is to prevent infinite loop."
+            f"FORCE-ACCEPTED after {MAX_REVISIONS} revision cycles. "
+            "Draft was not formally approved — accepted at revision limit to prevent infinite loop. "
+            "Manual review recommended before using this output."
         )
         return {
             "review_notes": note,
             "final_output": state.get("draft"),
-            "status": "complete",
-            "messages": [{"role": "assistant", "content": f"[reviewer] {note}"}],
+            "status": "accepted_at_limit",   # distinct from "complete"
+            "messages": [{"role": "assistant", "content": f"[reviewer] FORCE-ACCEPTED at revision limit"}],
         }
 
     prompt = f"""
@@ -434,7 +516,9 @@ def reviewer(state: State) -> dict:
     - Only flag genuinely wrong facts or broken logic — not stylistic preferences
     - Mathematical notation only needs to be internally consistent, not publication-perfect
     - If the writer addressed the previous revision notes, do not re-flag the same issues
-    - When in doubt, APPROVE — a good summary is better than an infinite revision loop
+    - When in doubt, request ONE specific targeted improvement rather than approving a weak draft
+    - Loop prevention is handled by the revision limit in code — do not approve prematurely
+    - Only APPROVE when the document genuinely and completely addresses the task with supported claims
 
     CHECK FOR:
     1. Unsupported claims — facts not grounded in the research or analysis
@@ -456,24 +540,57 @@ def reviewer(state: State) -> dict:
     """
     response = llm.generate(prompt, max_output_tokens=8192)
     
+    approved = False
+    review_notes = ""
+    issues = []
+
     try:
         review_data = _extract_json(str(response))
-        approved = review_data.get("verdict", "").upper() == "APPROVED"
-        reasoning = review_data.get("reasoning", "")
-        issues = review_data.get("issues", [])
-        if approved:
-            review_notes = f"APPROVED — {reasoning}"
-        else:
-            issues_text = "\n".join(f"{i+1}. {issue}" for i, issue in enumerate(issues))
-            review_notes = f"NEEDS REVISION\n\n{issues_text}"
+        verdict = review_data.get("verdict", "").upper().strip()
         
+        if verdict == "APPROVED":
+            reasoning = review_data.get("reasoning", "")
+            issues = review_data.get("issues", [])
+            
+            if issues:
+                approved = False
+                issues_text = "\n".join(f"{i+1}. {issue}" for i, issue in enumerate(issues))
+                review_notes = f"NEEDS REVISION\n\nContradictory response — verdict was APPROVED but issues were listed:\n{issues_text}"
+            else:
+                approved = True
+                review_notes = f"APPROVED — {reasoning}"
+                
+        elif verdict == "NEEDS_REVISION":
+            issues = review_data.get("issues", [])
+            if not issues:
+                review_notes = "NEEDS REVISION\n\n1. Reviewer indicated revision needed but did not specify issues. Please improve overall quality and resubmit."
+            else:
+                issues_text = "\n".join(f"{i+1}. {issue}" for i, issue in enumerate(issues))
+                review_notes = f"NEEDS REVISION\n\n{issues_text}"
+        else:
+            review_notes = f"NEEDS REVISION\n\n1. Reviewer returned malformed verdict {verdict!r}. Please improve and resubmit."
+
     except json.JSONDecodeError:
-        approved = str(response).strip().upper().startswith("APPROVED")
-        review_notes = str(response)
+        raw = str(response).strip().upper()
+        if raw.startswith("APPROVED") and "NEEDS" not in raw and len(raw) < 500:
+            approved = True
+            review_notes = f"APPROVED (fallback) — {str(response)[:200]}"
+        else:
+            approved = False
+            review_notes = f"NEEDS REVISION\n\n1. Reviewer returned unparseable response. Please improve and resubmit."
     
     if approved:
         fs = FileSystem(project_id=state["project_id"])
         fs.write("outputs/final_report.md", state.get("draft", "")) #type: ignore
+        
+    _.update_current_span(
+        metadata={
+            "verdict": "APPROVED" if approved else "NEEDS_REVISION",
+            "issues_count": str(len(issues) if not approved else 0),
+            "revision_count": str(revision_count),
+            "draft_length": str(len(state.get("draft") or "")),
+        }
+    )
 
     return {
         "review_notes": review_notes,
@@ -482,15 +599,41 @@ def reviewer(state: State) -> dict:
         "messages": [{"role": "assistant", "content": f"[reviewer] {'APPROVED' if approved else 'NEEDS REVISION'}"}],
     }
     
+@observe(name="critic", capture_input=False, capture_output=False)
 def critic(state: State) -> dict:
     papers = search_papers(query=str(state["task"]), limit=5)
-    
-    if not papers:
-        report = "No similar papers found — topic appears novel or search unavailable."
+    papers = None
+    api_error = False
+
+    try:
+        papers = search_papers(query=str(state["task"]), limit=5)
+    except Exception as e:
+        print(f"[critic] Semantic Scholar API failed: {e}")
+        api_error = True
+
+    if api_error:
+        report = (
+            "Novelty check unavailable — Semantic Scholar API error. "
+            "Proceeding without novelty assessment. "
+            "Writer should note that prior literature could not be verified."
+        )
         return {
             "novelty_report": report,
             "status": "running",
-            "messages": [{"role": "assistant", "content": f"[critic] {report}"}],
+            "messages": [{"role": "assistant", "content": "[critic] API error — novelty check skipped"}],
+        }
+
+    if not papers:
+        report = (
+            "No closely matching papers found in Semantic Scholar. "
+            "This may indicate a novel topic, a very specific query, or a search limitation. "
+            "Insufficient evidence to make a strong novelty claim. "
+            "Writer should proceed cautiously and avoid claiming novelty without verification."
+        )
+        return {
+            "novelty_report": report,
+            "status": "running",
+            "messages": [{"role": "assistant", "content": "[critic] no papers found — novelty unverified"}],
         }
     
     papers_text = "\n\n".join(
@@ -520,6 +663,14 @@ def critic(state: State) -> dict:
     Be specific and actionable. The writer will read this report before drafting.
     """
     response = llm.generate(prompt, max_output_tokens=2048)
+    
+    _.update_current_span(
+        metadata={
+            "papers_found": str(len(papers) if papers else 0),
+            "api_error": str(api_error),
+            "task": str(state["task"])[:100],
+        }
+    )
     
     return {
         "novelty_report": response,
