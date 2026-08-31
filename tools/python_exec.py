@@ -34,6 +34,12 @@ class PythonSandbox:
                 text=True,
                 timeout=self.timeout,
             )
+            
+            try:
+                self.fs.delete(script_name)
+            except Exception:
+                pass
+            
         except subprocess.TimeoutExpired:
             if self.fs.exists(script_name):
                 self.fs.delete(script_name)
