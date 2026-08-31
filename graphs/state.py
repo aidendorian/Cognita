@@ -27,3 +27,5 @@ class State(TypedDict):
     
     novelty_report: Optional[str]
     task_mode: Optional[str]
+    
+    output_files: Optional[list[str]]

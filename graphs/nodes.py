@@ -47,20 +47,23 @@ def _extract_json(text: str) -> dict:
             pass
     raise json.JSONDecodeError("No valid JSON found", text, 0)
 
-def _scan_outputs(project_id: int) -> str:
+def _get_output_files(project_id: int) -> list[str]:
     output_dir = Path(f"data/projects/{project_id}/outputs")
     if not output_dir.exists():
-        return "None."
-    files = [f.name for f in output_dir.iterdir() if f.is_file()]
-    return ", ".join(files) if files else "None."
+        return []
+    return [f.name for f in output_dir.iterdir() if f.is_file()]
 
 def entry(state: State) -> dict:
+    existing = state.get("messages") or []
+    new_messages = []
+    if not any(m.get("content") == state["task"] for m in existing if isinstance(m, dict)):
+        new_messages.append({"role": "user", "content": state["task"]})
     return {
-        "messages": [{"role": "user", "content": state["task"]}],
+        "messages": new_messages,
         "revision_count": 0,
         "status": "running",
     }
-
+    
 def planner(state: State) -> dict:
     if state.get("final_output"):
         return {"next_agent": "end", "status": "complete"}
@@ -93,7 +96,7 @@ def planner(state: State) -> dict:
     - Analysis done : {"yes" if state.get("analysis_summary") else "no"}
     - Draft exists : {"yes" if state.get("draft") else "no"}
     - Review notes : {mask(state.get("review_notes"), limit=400) if state.get("review_notes") else "none"}
-    - Output files : {_scan_outputs(state["project_id"])}
+    - Output files : {", ".join(state.get("output_files") or []) or "None."}
     - Revision count : {state.get("revision_count", 0)} of {MAX_REVISIONS} max
     - Task mode : {task_mode} (summary = quick report, paper = full paper with novelty check)
 
@@ -268,7 +271,7 @@ def coder(state: State) -> dict:
         code = str(llm.generate(fix_prompt, max_output_tokens=8192))
         execution = sandbox.run(code)
     
-    output_files = _scan_outputs(state["project_id"])
+    output_files = ", ".join(state.get("output_files") or []) or "None."
                     
     if execution["success"]:
         result = (
@@ -286,8 +289,9 @@ def coder(state: State) -> dict:
     return {
         "code_output": code,
         "code_result": result,
+        "output_files": _get_output_files(state["project_id"]),  # set once here
         "status": "running",
-        "messages": [{"role": "assistant", "content": f"[coder] {result[:200]}"}],
+        "messages": [...],
     }
 
 def analyst(state: State) -> dict:
@@ -363,7 +367,7 @@ def writer(state: State) -> dict:
     - Research summary : {mask(state.get("research_summary"), limit=1000)}
     - Analysis summary : {mask(state.get("analysis_summary"), limit=1000)}
     - Code result : {mask(state.get("code_result"), limit=600)}
-    - Output files : {_scan_outputs(state["project_id"])}
+    - Output files : {", ".join(state.get("output_files") or []) or "None."}
     - Previous draft : {state.get("draft") or "None yet."}
     - Reviewer feedback : {state.get("review_notes") or "None yet — first draft."}
     - Novelty report : {state.get("novelty_report") or "None — no novelty check done."}
@@ -421,7 +425,7 @@ def reviewer(state: State) -> dict:
     - Research summary : {mask(state.get("research_summary"), limit=600)}
     - Analysis summary : {mask(state.get("analysis_summary"), limit=600)}
     - Code result : {mask(state.get("code_result"), limit=400)}
-    - Output files : {_scan_outputs(state["project_id"])}
+    - Output files : {", ".join(state.get("output_files") or []) or "None."}
     - Prior notes : {mask(state.get("review_notes"), limit=400) or "None — first review."}
     
     CONTEXT:
@@ -498,7 +502,6 @@ def critic(state: State) -> dict:
         f"Abstract: {p['abstract'][:300]}"
         for p in papers
     )
-    
     prompt = f"""
     You are a research critic agent. Your job is to assess novelty and identify
     how a new research report should differentiate itself from existing work.
