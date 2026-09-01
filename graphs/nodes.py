@@ -6,7 +6,7 @@ from tools.filesystem import FileSystem
 from memory.project import load_project_memory
 from memory.summaries import format_prior_memory
 from tools.semantic_scholar import search_papers
-from rag.ingest import ingest
+from rag.ingest import ingest_text
 from tools.python_exec import PythonSandbox
 from tools.search import search as web_search
 from langfuse import observe
@@ -15,7 +15,7 @@ from pathlib import Path
 import re
 
 llm = LLM()
-VALID_AGENTS = {"researcher", "coder", "analyst", "writer", "reviewer", "critic", "end"}
+VALID_AGENTS = {"researcher", "coder", "analyst", "critic", "end"}
 MAX_REVISIONS = 2
 _ = get_client()
 
@@ -42,7 +42,7 @@ def _extract_json(text: str) -> dict:
             return json.loads(match.group(1))
         except json.JSONDecodeError:
             pass
-    match = re.search(r"\{.*\}", text, re.DOTALL)
+    match = re.search(r"\{.*?\}", text, re.DOTALL)
     if match:
         try:
             return json.loads(match.group())
@@ -85,119 +85,107 @@ def entry(state: State) -> dict:
         "status": "running",
     }
     
+def _derive_task_mode(state: State) -> str:
+    task_mode = state.get("task_mode")
+    if task_mode in {"paper", "summary"}:
+        return task_mode
+    paper_keywords = ["paper", "write up", "publish", "academic", "research paper", "novel"]
+    return "paper" if any(k in state["task"].lower() for k in paper_keywords) else "summary"
+
 @observe(name="planner", capture_input=False, capture_output=False)
 def planner(state: State) -> dict:
     if state.get("final_output"):
-        return {"next_agent": "end", "status": "complete"}
-    
-    task_lower = state["task"].lower()
-    paper_keywords = ["paper", "write up", "publish", "academic", "research paper", "novel"]
-    task_mode = state.get("task_mode")
-    if task_mode not in {"paper", "summary"}:
-        paper_keywords = ["paper", "write up", "publish", "academic", "research paper", "novel"]
-        task_mode = "paper" if any(k in task_lower for k in paper_keywords) else "summary"
+        return {"next_agent": "end", "status": "complete", "task_mode": state.get("task_mode")}
+
+    task_mode = _derive_task_mode(state)
 
     prompt = f"""
-    CRITICAL: Respond with ONLY a JSON object. No explanation, no markdown, no text before or after. Start your response with {{ and end with }}.
-    You are a research planning agent. Your job is to break down a task into clear steps
-    and decide which specialist agent should act next based on what has already been done.
+    CRITICAL: Respond with ONLY a JSON object. No explanation, no markdown, no text before or after.
+
+    You are the planning agent for a research pipeline. You decide what research work
+    to do next. You do NOT control writing or review — those happen automatically.
 
     TASK: {state["task"]}
+    TASK MODE: {task_mode}  (summary = concise report; paper = full academic paper)
 
-    AVAILABLE AGENTS:
-    - researcher : finds information, reads papers, does literature reviews, summarizes sources
-    - coder : writes and runs Python code, analyzes datasets, produces visualizations
-    - analyst : interprets findings, draws conclusions, identifies patterns and gaps
-    - writer : produces well-structured markdown reports and research documents
-    - reviewer : checks drafts for accuracy, missing citations, hallucinations, logical gaps
-    - critic : checks novelty against existing literature before paper writing begins
-    - end : use only when the task is fully complete and output is reviewed and ready
+    AGENTS YOU CAN ROUTE TO:
+    - researcher : web search, literature review, gathering facts
+    - coder : writes and runs Python (data analysis, visualisations, statistics)
+    - analyst : interprets findings, identifies patterns, draws conclusions, flags gaps
+    - critic : novelty check — searches Semantic Scholar, compares to existing literature
+                   Use before writing if task_mode=paper and no novelty_report yet
+    - end : all research is complete and ready for writing
+                   (writing and review happen automatically after you route to "end")
 
     CURRENT STATE:
-    - Plan so far : {state["plan"]}
-    - Last step run : {state["current_step"]}
-    - Last status : {state["status"]}
-    - Research done : {"yes" if state.get("research_summary") else "no"}
-    - Code run : {"yes" if state.get("code_result") else "no"}
-    - Analysis done : {"yes" if state.get("analysis_summary") else "no"}
-    - Draft exists : {"yes" if state.get("draft") else "no"}
-    - Review notes : {mask(state.get("review_notes"), limit=400) if state.get("review_notes") else "none"}
-    - Output files : {", ".join(state.get("output_files") or []) or "None."}
-    - Revision count : {state.get("revision_count", 0)} of {MAX_REVISIONS} max
-    - Task mode : {task_mode} (summary = quick report, paper = full paper with novelty check)
+    - Research summary : {"done — " + mask(state.get("research_summary"), 150) if state.get("research_summary") else "not done"}
+    - Analysis summary : {"done — " + mask(state.get("analysis_summary"), 150) if state.get("analysis_summary") else "not done"}
+    - Code result      : {"done — " + mask(state.get("code_result"), 100) if state.get("code_result") else "not done"}
+    - Novelty report   : {"done" if state.get("novelty_report") else "not done"}
+    - Review notes     : {mask(state.get("review_notes"), 300) or "none yet"}
+    - Output files     : {", ".join(state.get("output_files") or []) or "none"}
 
-    INSTRUCTIONS:
-    - Look at what has been completed before deciding the next step.
-    - If status is "failed", decide whether to retry the last step or route to end.
-    - If review notes exist and draft was rejected, route to writer (unless revision_count >= {MAX_REVISIONS}).
-    - If revision_count >= {MAX_REVISIONS}, route to end — do not send back to writer again.
-    - If draft exists and has not been reviewed, route to reviewer.
-    - Only route to "end" when draft exists AND has been reviewed and approved.
-    - Do not repeat a step that already produced output unless explicitly needed.
-    - If task_mode is "paper" and novelty_report does not exist, route to critic before writer
-    - If task_mode is "paper" and novelty_report exists, include it as writer context
+    ROUTING GUIDANCE:
+    - Route to "end" only when research is genuinely complete and sufficient for writing
+    - It is correct to loop: researcher → analyst → researcher when analysis reveals gaps
+    - For task_mode=paper with no novelty_report: route to critic before ending
+    - If reviewer sent the draft back with notes needing NEW FACTS: route to researcher
+      (the writer will be called automatically after you finish research)
 
     Return ONLY a valid JSON object:
     {{
-        "plan": ["step 1", "step 2", ...],
-        "current_step": "the single next step to execute right now",
-        "next_agent": "exactly one of: researcher, coder, analyst, writer, reviewer, critic, end"
+        "plan": ["step 1", "step 2", "..."],
+        "current_step": "specific instruction for the next agent",
+        "next_agent": "one of: researcher, coder, analyst, critic, end",
+        "reasoning": "one sentence explaining why"
     }}
     """
-    response = llm.generate(prompt, max_output_tokens=8192)
+    response = llm.generate(prompt, max_output_tokens=1024)
+
     try:
         data = _extract_json(str(response))
         data = _validate_planner_output(data)
     except json.JSONDecodeError:
         return {
             "plan": [],
-            "current_step": "planning failed — could not parse LLM response",
+            "current_step": "planning failed",
             "next_agent": "end",
             "status": "failed",
+            "task_mode": task_mode,
             "messages": [{"role": "assistant", "content": "[planner] failed to parse plan"}],
         }
-        
-    revision_count = state.get("revision_count") or 0
 
-    if state.get("final_output"):
-        data["next_agent"] = "end"
+    llm_agent = str(data.get("next_agent", "end"))
+    reasoning = data.get("reasoning", "")
 
-    elif state.get("draft") and not state.get("review_notes"):
-        data["next_agent"] = "reviewer"
+    if llm_agent not in VALID_AGENTS:
+        print(f"[planner] invalid agent {llm_agent!r} — routing to end")
+        next_agent = "end"
+    else:
+        next_agent = llm_agent
 
-    elif state.get("review_notes") and not str(state.get("review_notes", "")).upper().startswith("APPROVED") and revision_count < MAX_REVISIONS:
-        data["next_agent"] = "writer"
+    if next_agent == "end" and not state.get("research_summary"):
+        print("[planner] WARNING: 'end' with no research — overriding to researcher")
+        next_agent = "researcher"
 
-    elif revision_count >= MAX_REVISIONS:
-        data["next_agent"] = "end"
-        
-    elif task_mode == "paper" and not state.get("novelty_report") and state.get("research_summary"):
-        data["next_agent"] = "critic"    
-        
-    if data.get("next_agent") not in VALID_AGENTS:
-        return {
-            "plan": ["planner returned invalid agent — workflow ended safely"],
-            "current_step": "invalid agent returned by planner",
-            "next_agent": "end",
-            "status": "failed",
-            "messages": [{"role": "assistant", "content": "[planner] invalid agent returned — routing to end"}],
-        }
-        
     _.update_current_span(
         metadata={
-            "next_agent": str(data.get("next_agent", ""))[:200],
+            "next_agent": next_agent,
+            "llm_agent": llm_agent,
+            "overridden": str(next_agent != llm_agent),
+            "reasoning": reasoning[:200],
             "current_step": str(data.get("current_step", ""))[:100],
-            "revision_count": str(state.get("revision_count", 0)),
-            "task_mode": str(task_mode),
+            "task_mode": task_mode,
         }
     )
 
     return {
         "plan": data["plan"],
         "current_step": data["current_step"],
-        "next_agent": data["next_agent"],
+        "next_agent": next_agent,
         "status": "running",
-        "messages": [{"role": "assistant", "content": f"[planner] next: {data['next_agent']} — {data['current_step']}"}],
+        "task_mode": task_mode,
+        "messages": [{"role": "assistant", "content": f"[planner] {next_agent} — {data['current_step']} ({reasoning})"}],
     }
 
 @observe(name="researcher", capture_input=False, capture_output=False)
@@ -372,9 +360,10 @@ def analyst(state: State) -> dict:
         for file in outputs_path.iterdir():
             if file.suffix in (".csv", ".txt", ".json", ".md"):
                 try:
-                    ingest(str(file), project_id=state["project_id"], source_type="text")
+                    content = file.read_text(encoding="utf-8", errors="replace")
+                    ingest_text(content, project_id=state["project_id"], source_label=file.name)
                 except Exception as e:
-                    print(f"[coder] failed to ingest {file.name}: {e}")
+                    print(f"[analyst] failed to ingest {file.name}: {e}")
     
     csv_content = ""
     for f in fs.list_files("outputs"):
@@ -509,7 +498,7 @@ def reviewer(state: State) -> dict:
     REVISION : {revision_count} of {MAX_REVISIONS} max (auto-approve at limit)
 
     MATERIALS TO REVIEW:
-    - Draft : {state.get("draft") or "No draft yet."}
+    - Draft : {mask(state.get("draft"), limit=4000) if state.get("draft") else "No draft yet."}
     - Research summary : {mask(state.get("research_summary"), limit=600)}
     - Analysis summary : {mask(state.get("analysis_summary"), limit=600)}
     - Code result : {mask(state.get("code_result"), limit=400)}
