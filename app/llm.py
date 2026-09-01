@@ -109,20 +109,25 @@ class LLM:
         else:
             raise ValueError(f"Unknown LLM_BACKEND: {target!r} — must be 'hosted' or 'local'")
 
-    def generate(self, prompt: str, retries: int = 3, max_output_tokens: int = 8192) -> str: #type: ignore
-        """Call the LLM with exponential backoff on transient failures."""
+    def generate(self, prompt: str, retries: int = 3, max_output_tokens: int = 8192) -> str:  # type: ignore
         for attempt in range(retries):
             try:
                 return self._backend.generate(prompt, max_output_tokens=max_output_tokens)
             except Exception as e:
                 is_retryable = isinstance(e, RETRYABLE_EXCEPTIONS)
                 if not is_retryable:
-                    msg = str(e).lower()
-                    is_retryable = any(str(code) in msg for code in RETRYABLE_HTTP_CODES)
+                    status_code = (
+                        getattr(e, "status_code", None)
+                        or getattr(e, "code", None)
+                        or getattr(e, "response", None) and getattr(e.response, "status_code", None)  # type: ignore[union-attr]
+                    )
+                    if isinstance(status_code, int) and status_code in RETRYABLE_HTTP_CODES:
+                        is_retryable = True
+
                 if not is_retryable or attempt == retries - 1:
                     raise
                 wait = 2 ** attempt
-                print(f"[LLM] attempt {attempt + 1} failed ({e}), retrying in {wait}s...")
+                print(f"[LLM] attempt {attempt + 1} failed ({type(e).__name__}: {e}), retrying in {wait}s...")
                 time.sleep(wait)
 
     def summarize(self, content: str, max_words: int = 500) -> str:
