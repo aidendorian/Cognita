@@ -1,5 +1,5 @@
 from langgraph.graph import StateGraph, START, END
-import psycopg
+import psycopg_pool
 from psycopg.rows import dict_row
 from graphs.state import State
 from graphs.nodes import entry, planner, researcher, coder, analyst, writer, reviewer, critic
@@ -39,8 +39,6 @@ graph.add_conditional_edges(
         "researcher": "researcher",
         "coder": "coder",
         "analyst": "analyst",
-        "writer": "writer",
-        "reviewer": "reviewer",
         "critic": "critic",
         "end": END,
     },
@@ -51,6 +49,7 @@ graph.add_edge("coder", "planner")
 graph.add_edge("analyst", "planner")
 graph.add_edge("writer", "planner")
 graph.add_edge("critic", "planner")
+graph.add_edge("writer", "reviewer")
 
 graph.add_conditional_edges(
     "reviewer",
@@ -61,7 +60,14 @@ graph.add_conditional_edges(
     },
 )
 
-_conn = psycopg.connect(db_url, autocommit=True, row_factory=dict_row) #type: ignore
-checkpointer = PostgresSaver(_conn) #type: ignore
+_pool = psycopg_pool.ConnectionPool(
+    conninfo=db_url,
+    min_size=1,
+    max_size=5,
+    kwargs={"autocommit": True, "row_factory": dict_row},
+    open=True,
+)
+
+checkpointer = PostgresSaver(_pool)  # type: ignore
 checkpointer.setup()
 app = graph.compile(checkpointer=checkpointer)
