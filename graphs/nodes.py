@@ -92,7 +92,10 @@ def planner(state: State) -> dict:
     
     task_lower = state["task"].lower()
     paper_keywords = ["paper", "write up", "publish", "academic", "research paper", "novel"]
-    task_mode = "paper" if any(k in task_lower for k in paper_keywords) else "summary"
+    task_mode = state.get("task_mode")
+    if task_mode not in {"paper", "summary"}:
+        paper_keywords = ["paper", "write up", "publish", "academic", "research paper", "novel"]
+        task_mode = "paper" if any(k in task_lower for k in paper_keywords) else "summary"
 
     prompt = f"""
     CRITICAL: Respond with ONLY a JSON object. No explanation, no markdown, no text before or after. Start your response with {{ and end with }}.
@@ -138,7 +141,7 @@ def planner(state: State) -> dict:
     {{
         "plan": ["step 1", "step 2", ...],
         "current_step": "the single next step to execute right now",
-        "next_agent": "exactly one of: researcher, coder, analyst, writer, reviewer, end"
+        "next_agent": "exactly one of: researcher, coder, analyst, writer, reviewer, critic, end"
     }}
     """
     response = llm.generate(prompt, max_output_tokens=8192)
@@ -166,7 +169,10 @@ def planner(state: State) -> dict:
         data["next_agent"] = "writer"
 
     elif revision_count >= MAX_REVISIONS:
-        data["next_agent"] = "end"    
+        data["next_agent"] = "end"
+        
+    elif task_mode == "paper" and not state.get("novelty_report") and state.get("research_summary"):
+        data["next_agent"] = "critic"    
         
     if data.get("next_agent") not in VALID_AGENTS:
         return {
@@ -350,9 +356,9 @@ def coder(state: State) -> dict:
     return {
         "code_output": code,
         "code_result": result,
-        "output_files": _get_output_files(state["project_id"]),  # set once here
+        "output_files": _get_output_files(state["project_id"]),
         "status": "running",
-        "messages": [...],
+        "messages": [{"role": "assistant", "content": f"[coder] {result[:200]}"}],
     }
 
 @observe(name="analyst", capture_input=False, capture_output=False)
@@ -422,7 +428,7 @@ def analyst(state: State) -> dict:
         "status": "running",
         "messages": [{"role": "assistant", "content": f"[analyst] {summary}"}],
     }
-
+@observe(name="writer", capture_input=False, capture_output=False)
 def writer(state: State) -> dict:
     revision_count = (state.get("revision_count") or 0) + 1
 
@@ -601,7 +607,6 @@ def reviewer(state: State) -> dict:
     
 @observe(name="critic", capture_input=False, capture_output=False)
 def critic(state: State) -> dict:
-    papers = search_papers(query=str(state["task"]), limit=5)
     papers = None
     api_error = False
 
