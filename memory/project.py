@@ -4,13 +4,16 @@ from graphs.state import State
 
 def save_project_memory(project_id: int, state: State) -> None:
 
-    to_save = [("researcher", state.get("research_summary"), state.get("research_output")),
-               ("analyst",    state.get("analysis_summary"),  state.get("analysis"))]
+    to_save = [("researcher", state.get("research_summary"), state.get("research_output")),("analyst", state.get("analysis_summary"), state.get("analysis"))]
 
     with psycopg.connect(db_url) as conn:
         with conn.cursor() as cur:
             for agent, summary, raw in to_save:
                 if summary:
+                    cur.execute(
+                        "DELETE FROM summaries WHERE project_id = %s AND agent = %s",
+                        (project_id, agent),
+                    )
                     cur.execute(
                         """
                         INSERT INTO summaries (project_id, agent, content, raw_length)
@@ -20,6 +23,10 @@ def save_project_memory(project_id: int, state: State) -> None:
                     )
 
             if state.get("final_output"):
+                cur.execute(
+                    "DELETE FROM summaries WHERE project_id = %s AND agent = %s",
+                    (project_id, "writer"),
+                )
                 cur.execute(
                     """
                     INSERT INTO summaries (project_id, agent, content, raw_length)
@@ -33,7 +40,6 @@ def save_project_memory(project_id: int, state: State) -> None:
                     ),
                 )
         conn.commit()
-
 
 def load_project_memory(project_id: int) -> dict:
     with psycopg.connect(db_url) as conn:
