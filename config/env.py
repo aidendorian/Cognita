@@ -16,6 +16,9 @@ class ValidateENV(BaseSettings):
     langfuse_public_key: str = Field(..., validation_alias="LANGFUSE_PUBLIC_KEY", min_length=1)
     langfuse_secret_key: str = Field(..., validation_alias="LANGFUSE_SECRET_KEY", min_length=1)
     langfuse_base_url: str = Field(..., validation_alias="LANGFUSE_BASE_URL", min_length=1)
+    neo4j_uri: str = Field("bolt://localhost:7687", validation_alias="NEO4J_URI")
+    neo4j_user: str = Field("neo4j", validation_alias="NEO4J_USER")
+    neo4j_password: str = Field(..., validation_alias="NEO4J_PASSWORD", min_length=1)
     
     @property
     def db_url(self) -> str:
@@ -44,3 +47,6 @@ tavily_key = validate.tavily_key
 langfuse_public_key = validate.langfuse_public_key
 langfuse_secret_key = validate.langfuse_secret_key
 langfuse_base_url = validate.langfuse_base_url
+neo4j_uri = validate.neo4j_uri
+neo4j_user = validate.neo4j_user
+neo4j_password = validate.neo4j_password
