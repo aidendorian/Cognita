@@ -20,6 +20,9 @@ class ValidateENV(BaseSettings):
     neo4j_user: str = Field("neo4j", validation_alias="NEO4J_USER")
     neo4j_password: str = Field(..., validation_alias="NEO4J_PASSWORD", min_length=1)
     db_host: str = Field("localhost", validation_alias="DATABASE_HOST")
+    fastapi_api_key: str = Field(..., validation_alias="FASTAPI_API_KEY", min_length=1)
+    reranker_top_k: int = Field(5, validation_alias="RERANKER_TOP_K", min_length=1)
+    enable_reranker: bool = Field(False, validation_alias="ENABLE_RERANKER", min_length=1)
     
     def db_url(self) -> str:
         return f"postgresql://{self.db_username}:{self.db_password}@{self.db_host}:5432/{self.db_name}"
@@ -41,7 +44,7 @@ except ValidationError as e:
 
 api_key = validate.api_key
 llm_model = validate.llm_model
-db_url = validate.db_url
+db_url = validate.db_url()
 llm_backend = validate.llm_backend
 tavily_key = validate.tavily_key
 langfuse_public_key = validate.langfuse_public_key
@@ -51,3 +54,6 @@ neo4j_uri = validate.neo4j_uri
 neo4j_user = validate.neo4j_user
 neo4j_password = validate.neo4j_password
 db_host = validate.db_host
+fastapi_api_key = validate.fastapi_api_key
+reranker_top_k = validate.reranker_top_k
+enable_reranker = validate.enable_reranker
