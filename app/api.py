@@ -5,7 +5,7 @@ from pathlib import Path
 from memory.conversation import create_chat, save_messages
 from memory.project import save_project_memory
 import psycopg
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from app.runs import upsert_run, get_run
@@ -14,6 +14,9 @@ from tools.filesystem import FileSystem
 from contextlib import asynccontextmanager
 from graphs.checkpointer import get_checkpointer
 from memory.knowledge_graph import shutdown_graphiti
+from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
+from app.dependencies import validate_api_key, limiter
 
 MAX_FILE_SIZE = 50 * 1024 * 1024
 ALLOWED_MIME_TYPES = {"application/pdf"}
@@ -31,6 +34,9 @@ app = FastAPI(
     version="0.1.0",
 )
 
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler) #type: ignore
+
 class ProjectCreate(BaseModel):
     name: str
 
@@ -41,7 +47,7 @@ class IngestURLRequest(BaseModel):
     url: str
 
 def _get_conn():
-    return psycopg.connect(db_url) #type: ignore
+    return psycopg.connect(db_url)  # type: ignore
 
 def _project_exists(project_id: int) -> bool:
     with _get_conn() as conn:
@@ -49,10 +55,8 @@ def _project_exists(project_id: int) -> bool:
             cur.execute("SELECT id FROM projects WHERE id = %s", (project_id,))
             return cur.fetchone() is not None
 
-
 def _run_workflow_background(project_id: int, task: str) -> None:
     """Runs in a background thread — updates _runs dict as it progresses."""
-
     try:
         from graphs.graph import get_app
         graph_app = get_app()
@@ -84,26 +88,28 @@ def _run_workflow_background(project_id: int, task: str) -> None:
         }
 
         result = graph_app.invoke(
-            initial_state, #type: ignore
+            initial_state,  # type: ignore
             config={"recursion_limit": 20, "configurable": {"thread_id": thread_id}},
         )
 
         chat_id = create_chat(project_id)
         save_messages(chat_id, result["messages"])
-        save_project_memory(project_id, result) #type: ignore
+        save_project_memory(project_id, result)  # type: ignore
 
         final_output = result.get("final_output")
         upsert_run(project_id, "complete", task=task, final_output=final_output)
 
     except Exception as e:
         upsert_run(project_id, "error", task=task, error=str(e))
-        
+
 @app.get("/")
-async def root():
+@limiter.limit("60/minute")
+async def root(request: Request):
     return {"name": "ResearchPlatform API", "version": "0.1.0", "status": "running"}
 
 @app.post("/projects", status_code=201)
-async def create_project(body: ProjectCreate):
+@limiter.limit("5/minute")
+async def create_project(request: Request, body: ProjectCreate, api_key: str = Depends(validate_api_key)):
     """Create a new research project."""
     with _get_conn() as conn:
         with conn.cursor() as cur:
@@ -113,10 +119,11 @@ async def create_project(body: ProjectCreate):
             )
             row = cur.fetchone()
         conn.commit()
-    return {"id": row[0], "name": row[1], "created_at": str(row[2])} #type: ignore
+    return {"id": row[0], "name": row[1], "created_at": str(row[2])}  # type: ignore
 
 @app.get("/projects")
-async def list_projects():
+@limiter.limit("30/minute")
+async def list_projects(request: Request, api_key: str = Depends(validate_api_key)):
     """List all projects."""
     with _get_conn() as conn:
         with conn.cursor() as cur:
@@ -125,7 +132,8 @@ async def list_projects():
     return [{"id": r[0], "name": r[1], "created_at": str(r[2])} for r in rows]
 
 @app.post("/projects/{project_id}/run")
-async def run_workflow(project_id: int, body: RunRequest):
+@limiter.limit("2/minute")
+async def run_workflow(request: Request, project_id: int, body: RunRequest,api_key: str = Depends(validate_api_key)):
     if not _project_exists(project_id):
         raise HTTPException(404, "Project not found")
     
@@ -142,14 +150,16 @@ async def run_workflow(project_id: int, body: RunRequest):
     }
 
 @app.get("/projects/{project_id}/status")
-async def get_status(project_id: int):
+@limiter.limit("30/minute")
+async def get_status(request: Request, project_id: int, api_key: str = Depends(validate_api_key)):
     run = get_run(project_id)
     if not run:
         raise HTTPException(404, "No run found for this project")
     return run
 
 @app.get("/projects/{project_id}/report")
-async def get_report(project_id: int):
+@limiter.limit("20/minute")
+async def get_report(request: Request, project_id: int, api_key: str = Depends(validate_api_key)):
     """
     Get the final approved report for a project.
     Returns the markdown report file if it exists.
@@ -182,7 +192,8 @@ async def get_report(project_id: int):
 
 
 @app.post("/projects/{project_id}/ingest")
-async def ingest_source(project_id: int, url: Optional[str] = Form(None), file: Optional[UploadFile] = File(None)):
+@limiter.limit("10/minute")
+async def ingest_source(request: Request, project_id: int, api_key: str = Depends(validate_api_key), url: Optional[str] = Form(None), file: Optional[UploadFile] = File(None)):
     """
     Ingest a URL or PDF file into the project's knowledge base.
     Pass either `url` (form field) or `file` (multipart upload), not both.
@@ -217,8 +228,10 @@ async def ingest_source(project_id: int, url: Optional[str] = Form(None), file: 
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"PDF ingestion failed: {e}")
 
+
 @app.get("/projects/{project_id}/memory")
-async def get_memory(project_id: int):
+@limiter.limit("30/minute")
+async def get_memory(request: Request, project_id: int, api_key: str = Depends(validate_api_key)):
     """Get accumulated project memory — prior research and analysis summaries."""
     if not _project_exists(project_id):
         raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
