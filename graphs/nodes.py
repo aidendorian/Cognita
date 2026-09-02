@@ -6,13 +6,15 @@ from tools.filesystem import FileSystem
 from memory.project import load_project_memory
 from memory.summaries import format_prior_memory
 from tools.semantic_scholar import search_papers
-from rag.ingest import ingest_text
 from tools.python_exec import PythonSandbox
 from tools.search import search as web_search
 from langfuse import observe
 from memory.knowledge_graph import add_research_episode, search_knowledge_graph
 from pathlib import Path
 import re
+import logging
+
+logger = logging.Logger("ResearchAgent")
 
 _llm = None
 _client = None
@@ -74,11 +76,18 @@ def _validate_planner_output(data: dict) -> dict:
 
     return data
 
-def _get_output_files(project_id: int) -> list[str]:
-    output_dir = Path(f"data/projects/{project_id}/outputs")
-    if not output_dir.exists():
+def _get_output_files(project_id: int, run_id: str | None = None) -> list[str]:
+    """Return generated files for this run, never files from another run."""
+    if run_id:
+        output_dir = Path("data") / "projects" / str(project_id) / "runs" / run_id / "outputs"
+        root = output_dir.parent.parent
+    else:
+        output_dir = Path("data") / "projects" / str(project_id) / "outputs"
+        root = output_dir.parent
+    if not output_dir.is_dir():
         return []
-    return [f.name for f in output_dir.iterdir() if f.is_file()]
+    return sorted(str(path.relative_to(root)) for path in output_dir.rglob("*") if path.is_file())
+
 
 @observe(name="entry", capture_input=False, capture_output=False)
 def entry(state: State) -> dict:
@@ -173,13 +182,13 @@ def planner(state: State) -> dict:
     reasoning = data.get("reasoning", "")
 
     if llm_agent not in VALID_AGENTS:
-        print(f"[planner] invalid agent {llm_agent!r} — routing to end")
+        logger.warning("[planner] invalid agent %r — routing to end", llm_agent)
         next_agent = "end"
     else:
         next_agent = llm_agent
 
     if next_agent == "end" and not state.get("research_summary"):
-        print("[planner] WARNING: 'end' with no research — overriding to researcher")
+        logger.warning("[planner] end with no research — overriding to researcher")
         next_agent = "researcher"
 
     get_langfuse_client().update_current_span(
@@ -221,7 +230,7 @@ def researcher(state: State) -> dict:
             max_results=3
         )
     except Exception as e:
-        print(f"[researcher] web search failed: {e}")
+        logger.warning("[researcher] web search failed: %s", e)
         
     context = "\n\n".join(f"[Source: {c['source']}]\n{c['chunk_text'][:600]}" for c in chunks) if chunks else "No relevant documents found in knowledge base."
 
@@ -274,6 +283,7 @@ def researcher(state: State) -> dict:
     get_langfuse_client().update_current_span(
         metadata={
             "project_id": str(state["project_id"]),
+            "run_id": str(state.get("run_id", "")),
             "task": str(state["task"])[:100],
             "chunks_retrieved": str(len(chunks)),
             "web_results": str(len(search_results)),
@@ -325,7 +335,7 @@ def coder(state: State) -> dict:
     MAX_CODE_RETRIES = 3
 
     code = str(get_llm().generate(prompt, max_output_tokens=8192))
-    sandbox = PythonSandbox(project_id=state["project_id"])
+    sandbox = PythonSandbox(project_id=state["project_id"], run_id=state.get("run_id"))
     execution = sandbox.run(code)
 
     attempt = 0
@@ -347,7 +357,7 @@ def coder(state: State) -> dict:
         code = str(get_llm().generate(fix_prompt, max_output_tokens=8192))
         execution = sandbox.run(code)
     
-    output_files = _get_output_files(state["project_id"])
+    output_files = _get_output_files(state["project_id"], state.get("run_id"))
     output_files_str = ", ".join(output_files) or "None."
                     
     if execution["success"]:
@@ -369,13 +379,14 @@ def coder(state: State) -> dict:
             "attempt_count": str(attempt),
             "files_generated": str(output_files)[:200],
             "project_id": str(state["project_id"]),
+            "run_id": str(state.get("run_id", "")),
         }
     )
 
     return {
         "code_output": code,
         "code_result": result,
-        "output_files": _get_output_files(state["project_id"]),
+        "output_files": _get_output_files(state["project_id"], state.get("run_id")),
         "status": "running",
         "messages": [{"role": "assistant", "content": f"[coder] {result[:200]}"}],
     }
@@ -384,18 +395,11 @@ def coder(state: State) -> dict:
 def analyst(state: State) -> dict:
     prior = load_project_memory(state["project_id"])
     prior_context = format_prior_memory(prior)
-    fs = FileSystem(project_id=state["project_id"])
+    fs = FileSystem(project_id=state["project_id"], run_id=state.get("run_id"))
     
-    outputs_path = Path(f"data/projects/{state['project_id']}/outputs")
-    if outputs_path.exists():
-        for file in outputs_path.iterdir():
-            if file.suffix in (".csv", ".txt", ".json", ".md"):
-                try:
-                    content = file.read_text(encoding="utf-8", errors="replace")
-                    ingest_text(content, project_id=state["project_id"], source_label=file.name)
-                except Exception as e:
-                    print(f"[analyst] failed to ingest {file.name}: {e}")
-    
+    # Generated artifacts stay run-scoped and are not added to project-wide RAG.
+    # This prevents later runs from retrieving another run's outputs as sources.
+
     csv_content = ""
     for f in fs.list_files("outputs"):
         if f.endswith(".csv"):
@@ -491,7 +495,7 @@ def writer(state: State) -> dict:
     Return ONLY valid markdown. No preamble, no commentary outside the document.
     """
     response = get_llm().generate(prompt)
-    fs = FileSystem(project_id=state["project_id"])
+    fs = FileSystem(project_id=state["project_id"], run_id=state.get("run_id"))
     filename = f"outputs/draft_v{revision_count}.md"
     fs.write(filename, str(response))
     
@@ -523,7 +527,7 @@ def reviewer(state: State) -> dict:
         return {
             "review_notes": note,
             "final_output": state.get("draft"),
-            "status": "accepted_at_limit",   # distinct from "complete"
+            "status": "needs_review",   # distinct from "complete"
             "messages": [{"role": "assistant", "content": f"[reviewer] FORCE-ACCEPTED at revision limit"}],
         }
 
@@ -613,8 +617,8 @@ def reviewer(state: State) -> dict:
             review_notes = f"NEEDS REVISION\n\n1. Reviewer returned unparseable response. Please improve and resubmit."
     
     if approved:
-        fs = FileSystem(project_id=state["project_id"])
-        fs.write("outputs/final_report.md", state.get("draft")) #type: ignore
+        fs = FileSystem(project_id=state["project_id"], run_id=state.get("run_id"))
+        fs.write("outputs/final_report.md", state.get("draft") or "") #type: ignore
         
     get_langfuse_client().update_current_span(
         metadata={
@@ -628,7 +632,7 @@ def reviewer(state: State) -> dict:
     return {
         "review_notes": review_notes,
         "final_output": state.get("draft") if approved else None,
-        "status": "complete" if approved else "running",
+        "status": "completed" if approved else "running",
         "messages": [{"role": "assistant", "content": f"[reviewer] {'APPROVED' if approved else 'NEEDS REVISION'}"}],
     }
     
@@ -643,7 +647,7 @@ def critic(state: State) -> dict:
     try:
         papers = search_papers(query=str(state["task"]), limit=5)
     except Exception as e:
-        print(f"[critic] Semantic Scholar API failed: {e}")
+        logger.warning("[critic] Semantic Scholar API failed: %s", e)
         api_error = True
 
     if api_error:
