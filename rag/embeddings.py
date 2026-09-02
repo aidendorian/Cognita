@@ -2,7 +2,7 @@ from google import genai
 from config.env import api_key
 from google.genai import types
 
-EMBEDDING_MODEL = "gemini-embedding-001"
+EMBEDDING_MODEL = "gemini-embedding-2"
 
 client = genai.Client(api_key=api_key)
 
