@@ -2,30 +2,52 @@ import uuid
 import threading
 from typing import Optional
 from pathlib import Path
-from memory.conversation import create_chat, save_messages
-from memory.project import save_project_memory
-import psycopg
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from app.runs import upsert_run, get_run
+from psycopg_pool import ConnectionPool
+from memory.conversation import create_chat, save_messages
+from memory.project import save_project_memory
 from config.env import db_url
-from tools.filesystem import FileSystem
-from contextlib import asynccontextmanager
+from app.dependencies import validate_api_key, limiter
 from graphs.checkpointer import get_checkpointer
 from memory.knowledge_graph import shutdown_graphiti
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
-from app.dependencies import validate_api_key, limiter
 
 MAX_FILE_SIZE = 50 * 1024 * 1024
 ALLOWED_MIME_TYPES = {"application/pdf"}
 
+_pool: Optional[ConnectionPool] = None
+
+def get_pool() -> ConnectionPool:
+    global _pool
+
+    if _pool is None:
+        _pool = ConnectionPool(
+            db_url,
+            min_size=1,
+            max_size=10,
+            open=True,
+        )
+
+    return _pool
+
 @asynccontextmanager
-async def lifespan(app):
+async def lifespan(app: FastAPI):
     get_checkpointer()
-    yield
-    shutdown_graphiti()
+    get_pool()
+
+    try:
+        yield
+    finally:
+        shutdown_graphiti()
+        global _pool
+        if _pool is not None:
+            _pool.close()
+            _pool = None
+
 
 app = FastAPI(
     title="ResearchPlatform API",
@@ -43,29 +65,145 @@ class ProjectCreate(BaseModel):
 class RunRequest(BaseModel):
     task: str
 
-class IngestURLRequest(BaseModel):
-    url: str
-
-def _get_conn():
-    return psycopg.connect(db_url)  # type: ignore
-
 def _project_exists(project_id: int) -> bool:
-    with _get_conn() as conn:
+    with get_pool().connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM projects WHERE id = %s", (project_id,))
+            cur.execute(
+                "SELECT 1 FROM projects WHERE id = %s",
+                (project_id,),
+            )
             return cur.fetchone() is not None
 
-def _run_workflow_background(project_id: int, task: str) -> None:
-    """Runs in a background thread — updates _runs dict as it progresses."""
+def _create_run(project_id: int, task: str) -> tuple[str, str]:
+    """Create the durable run record before starting the worker."""
+    run_id = str(uuid.uuid4())
+    thread_id = f"run-{run_id}"
+
+    with get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO runs (id, project_id, thread_id, task, current_agent, status, config) VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb)
+                """,
+                (run_id, project_id, thread_id, task, "initializing", "pending", "{}"),
+            )
+        conn.commit()
+
+    return run_id, thread_id
+
+def _update_run(run_id: str, *, status: Optional[str] = None, current_agent: Optional[str] = None, final_output: Optional[str] = None, error: Optional[str] = None) -> None:
+    """Update a run using the current run-centric schema."""
+    updates = []
+    params = []
+
+    if status is not None:
+        updates.append("status = %s")
+        params.append(status)
+
+        if status == "running":
+            updates.append("started_at = COALESCE(started_at, NOW())")
+
+        if status in {"completed", "failed", "cancelled"}:
+            updates.append("completed_at = COALESCE(completed_at, NOW())")
+
+    if current_agent is not None:
+        updates.append("current_agent = %s")
+        params.append(current_agent)
+
+    if final_output is not None:
+        updates.append("final_output = %s")
+        params.append(final_output)
+
+    if error is not None:
+        updates.append("error = %s")
+        params.append(error)
+
+    if not updates:
+        return
+
+    updates.append("updated_at = NOW()")
+    params.append(run_id)
+
+    with get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE runs
+                SET {", ".join(updates)}
+                WHERE id = %s
+                """,
+                tuple(params),
+            )
+        conn.commit()
+
+def _get_run_by_id(run_id: str) -> Optional[dict]:
+    with get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, project_id, thread_id, task, current_agent, config, status, final_output, error, created_at, started_at, completed_at, updated_at
+                FROM runs
+                WHERE id = %s
+                """,
+                (run_id,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "run_id": str(row[0]),
+        "project_id": row[1],
+        "thread_id": row[2],
+        "task": row[3],
+        "current_agent": row[4],
+        "config": row[5],
+        "status": row[6],
+        "final_output": row[7],
+        "error": row[8],
+        "created_at": str(row[9]),
+        "started_at": str(row[10]) if row[10] else None,
+        "completed_at": str(row[11]) if row[11] else None,
+        "updated_at": str(row[12]),
+    }
+
+
+def _get_latest_run(project_id: int) -> Optional[dict]:
+    with get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id
+                FROM runs
+                WHERE project_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (project_id,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return _get_run_by_id(str(row[0]))
+
+def _run_workflow_background(project_id: int, run_id: str, thread_id: str, task: str) -> None:
     try:
         from graphs.graph import get_app
+
+        _update_run(
+            run_id,
+            status="running",
+            current_agent="initializing",
+        )
+
         graph_app = get_app()
-        
-        upsert_run(project_id, "running", task=task)
-        thread_id = f"project-{project_id}-{uuid.uuid4().hex[:8]}"
 
         initial_state = {
             "project_id": project_id,
+            "run_id": run_id,
             "task": task,
             "plan": None,
             "current_step": None,
@@ -88,153 +226,324 @@ def _run_workflow_background(project_id: int, task: str) -> None:
         }
 
         result = graph_app.invoke(
-            initial_state,  # type: ignore
-            config={"recursion_limit": 20, "configurable": {"thread_id": thread_id}},
+            initial_state,  # type: ignore[arg-type]
+            config={
+                "recursion_limit": 20,
+                "configurable": {"thread_id": thread_id},
+            },
         )
 
-        chat_id = create_chat(project_id)
-        save_messages(chat_id, result["messages"])
-        save_project_memory(project_id, result)  # type: ignore
+        messages = result.get("messages", [])
+        if messages:
+            chat_id = create_chat(project_id)
+            save_messages(chat_id, messages)
+
+        save_project_memory(project_id, result)  # type: ignore[arg-type]
 
         final_output = result.get("final_output")
-        upsert_run(project_id, "complete", task=task, final_output=final_output)
 
-    except Exception as e:
-        upsert_run(project_id, "error", task=task, error=str(e))
+        _update_run(
+            run_id,
+            status="completed",
+            current_agent="completed",
+            final_output=final_output,
+        )
+
+    except Exception as exc:
+        try:
+            _update_run(
+                run_id,
+                status="failed",
+                current_agent="failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception:
+            pass
 
 @app.get("/")
 @limiter.limit("60/minute")
 async def root(request: Request):
-    return {"name": "ResearchPlatform API", "version": "0.1.0", "status": "running"}
+    return {
+        "name": "ResearchPlatform API",
+        "version": "0.1.0",
+        "status": "running",
+    }
 
 @app.post("/projects", status_code=201)
 @limiter.limit("5/minute")
 async def create_project(request: Request, body: ProjectCreate, api_key: str = Depends(validate_api_key)):
-    """Create a new research project."""
-    with _get_conn() as conn:
+    with get_pool().connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO projects (name) VALUES (%s) RETURNING id, name, created_at",
+                """
+                INSERT INTO projects (name)
+                VALUES (%s)
+                RETURNING id, name, created_at
+                """,
                 (body.name,),
             )
             row = cur.fetchone()
         conn.commit()
-    return {"id": row[0], "name": row[1], "created_at": str(row[2])}  # type: ignore
+
+    return {
+        "id": row[0], #type: ignore
+        "name": row[1], #type: ignore
+        "created_at": str(row[2]), #type: ignore
+    }
+
 
 @app.get("/projects")
 @limiter.limit("30/minute")
 async def list_projects(request: Request, api_key: str = Depends(validate_api_key)):
-    """List all projects."""
-    with _get_conn() as conn:
+    with get_pool().connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT id, name, created_at FROM projects ORDER BY created_at DESC")
+            cur.execute(
+                """
+                SELECT id, name, created_at
+                FROM projects
+                ORDER BY created_at DESC
+                """
+            )
             rows = cur.fetchall()
-    return [{"id": r[0], "name": r[1], "created_at": str(r[2])} for r in rows]
 
-@app.post("/projects/{project_id}/run")
+    return [
+        {
+            "id": row[0],
+            "name": row[1],
+            "created_at": str(row[2]),
+        }
+        for row in rows
+    ]
+
+@app.post("/projects/{project_id}/run", status_code=202)
 @limiter.limit("2/minute")
-async def run_workflow(request: Request, project_id: int, body: RunRequest,api_key: str = Depends(validate_api_key)):
+async def run_workflow(request: Request, project_id: int, body: RunRequest, api_key: str = Depends(validate_api_key)):
     if not _project_exists(project_id):
         raise HTTPException(404, "Project not found")
-    
+
+    task = body.task.strip()
+    if not task:
+        raise HTTPException(400, "Task cannot be empty")
+
+    run_id, thread_id = _create_run(project_id, task)
+
     thread = threading.Thread(
         target=_run_workflow_background,
-        args=(project_id, body.task),
-        daemon=True
+        args=(project_id, run_id, thread_id, task),
+        name=f"research-run-{run_id[:8]}",
+        daemon=True,
     )
     thread.start()
-    
+
     return {
+        "run_id": run_id,
         "project_id": project_id,
-        "status": "started"
+        "status": "pending",
     }
+
+@app.get("/runs/{run_id}")
+@limiter.limit("30/minute")
+async def get_run_status(request: Request, run_id: str, api_key: str = Depends(validate_api_key)):
+    run = _get_run_by_id(run_id)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    return run
+
 
 @app.get("/projects/{project_id}/status")
 @limiter.limit("30/minute")
-async def get_status(request: Request, project_id: int, api_key: str = Depends(validate_api_key)):
-    run = get_run(project_id)
+async def get_project_status(request: Request, project_id: int, api_key: str = Depends(validate_api_key), run_id: Optional[str] = None):
+    if not _project_exists(project_id):
+        raise HTTPException(404, "Project not found")
+
+    if run_id:
+        run = _get_run_by_id(run_id)
+
+        if not run or run["project_id"] != project_id:
+            raise HTTPException(404, "Run not found for this project")
+
+        return run
+
+    run = _get_latest_run(project_id)
+
     if not run:
-        raise HTTPException(404, "No run found for this project")
+        raise HTTPException(404, "No runs found for this project")
+
     return run
 
-@app.get("/projects/{project_id}/report")
+def _report_path(project_id: int, run_id: str) -> Path:
+    return (
+        Path("data")
+        / "projects"
+        / str(project_id)
+        / "runs"
+        / run_id
+        / "outputs"
+        / "final_report.md"
+    )
+
+
+def _draft_paths(project_id: int, run_id: str) -> list[str]:
+    output_dir = _report_path(project_id, run_id).parent
+
+    if not output_dir.is_dir():
+        return []
+
+    return [
+        str(path.relative_to(Path("data") / "projects" / str(project_id) / "runs" / run_id))
+        for path in sorted(output_dir.glob("draft_v*.md"))
+        if path.is_file()
+    ]
+
+@app.get("/runs/{run_id}/report")
 @limiter.limit("20/minute")
-async def get_report(request: Request, project_id: int, api_key: str = Depends(validate_api_key)):
-    """
-    Get the final approved report for a project.
-    Returns the markdown report file if it exists.
-    """
-    if not _project_exists(project_id):
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+async def get_run_report(request: Request, run_id: str, api_key: str = Depends(validate_api_key)):
+    run = _get_run_by_id(run_id)
 
-    report_path = Path(f"data/projects/{project_id}/outputs/final_report.md")
+    if not run:
+        raise HTTPException(404, "Run not found")
 
-    if not report_path.exists():
-        fs = FileSystem(project_id=project_id)
-        files = fs.list_files("outputs")
-        drafts = [f for f in files if f.startswith("outputs/draft")]
+    project_id = run["project_id"]
+    report_path = _report_path(project_id, run_id)
+
+    if not report_path.is_file():
+        drafts = _draft_paths(project_id, run_id)
 
         if drafts:
             return {
                 "project_id": project_id,
+                "run_id": run_id,
                 "status": "in_progress",
-                "message": "No final report yet — workflow still in progress",
+                "message": "No final report yet",
                 "drafts_available": drafts,
             }
 
-        raise HTTPException(status_code=404, detail="No report found for this project")
+        if run["status"] in {"pending", "running"}:
+            raise HTTPException(404, "No report yet — workflow is still in progress")
+
+        raise HTTPException(404, "No report found for this run")
 
     return FileResponse(
         path=str(report_path),
         media_type="text/markdown",
-        filename=f"report_project_{project_id}.md",
+        filename=f"report_run_{run_id}.md",
     )
 
+@app.get("/projects/{project_id}/report")
+@limiter.limit("20/minute")
+async def get_latest_project_report(request: Request, project_id: int, api_key: str = Depends(validate_api_key)):
+    if not _project_exists(project_id):
+        raise HTTPException(404, f"Project {project_id} not found")
+
+    run = _get_latest_run(project_id)
+
+    if not run:
+        raise HTTPException(404, "No runs found for this project")
+
+    if run["status"] != "completed":
+        raise HTTPException(
+            409,
+            f"Latest run is not completed (status: {run['status']})",
+        )
+
+    return await get_run_report(
+        request=request,
+        run_id=run["run_id"],
+        api_key=api_key,
+    )
 
 @app.post("/projects/{project_id}/ingest")
 @limiter.limit("10/minute")
 async def ingest_source(request: Request, project_id: int, api_key: str = Depends(validate_api_key), url: Optional[str] = Form(None), file: Optional[UploadFile] = File(None)):
-    """
-    Ingest a URL or PDF file into the project's knowledge base.
-    Pass either `url` (form field) or `file` (multipart upload), not both.
-    """
     if not _project_exists(project_id):
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+        raise HTTPException(404, f"Project {project_id} not found")
 
     if url and file:
-        raise HTTPException(status_code=400, detail="Pass either url or file, not both")
+        raise HTTPException(400, "Pass either url or file, not both")
 
     if not url and not file:
-        raise HTTPException(status_code=400, detail="Pass either url or file")
-
-    from rag.ingest import ingest_url, ingest_pdf
+        raise HTTPException(400, "Pass either url or file")
 
     if url:
-        try:
-            chunks = ingest_url(url=url, project_id=project_id)
-            return {"project_id": project_id, "source": url, "chunks_stored": chunks}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Ingestion failed: {e}")
+        from rag.ingest import ingest_url
 
-    if file:
-        fs = FileSystem(project_id=project_id)
-        filename = f"sources/pdfs/{file.filename}"
-        content = await file.read()
-        fs.write_bytes(filename, content)
-        full_path = str(Path(f"data/projects/{project_id}") / filename)
         try:
-            chunks = ingest_pdf(path=full_path, project_id=project_id)
-            return {"project_id": project_id, "source": filename, "chunks_stored": chunks}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"PDF ingestion failed: {e}")
+            chunks = ingest_url(
+                url=url.strip(),
+                project_id=project_id,
+            )
+            return {
+                "project_id": project_id,
+                "source": url,
+                "chunks_stored": chunks,
+            }
+        except Exception as exc:
+            raise HTTPException(
+                500,
+                f"Ingestion failed: {type(exc).__name__}: {exc}",
+            ) from exc
 
+    assert file is not None
+
+    filename = Path(file.filename or "upload.pdf").name
+
+    if not filename.lower().endswith(".pdf"):
+        raise HTTPException(415, "Only PDF files are supported")
+
+    if file.content_type and file.content_type not in ALLOWED_MIME_TYPES:
+        raise HTTPException(
+            415,
+            f"Unsupported MIME type. Allowed: {sorted(ALLOWED_MIME_TYPES)}",
+        )
+
+    content = await file.read(MAX_FILE_SIZE + 1)
+
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(
+            413,
+            f"File too large. Max size: {MAX_FILE_SIZE} bytes",
+        )
+
+    from rag.ingest import ingest_pdf
+    from tools.filesystem import FileSystem
+    
+    fs = FileSystem(project_id=project_id)
+    relative_path = f"sources/pdfs/{filename}"
+
+    try:
+        fs.write_bytes(relative_path, content)
+
+        full_path = str(
+            Path("data")
+            / "projects"
+            / str(project_id)
+            / relative_path
+        )
+
+        chunks = ingest_pdf(
+            path=full_path,
+            project_id=project_id,
+        )
+
+        return {
+            "project_id": project_id,
+            "source": relative_path,
+            "chunks_stored": chunks,
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            500,
+            f"PDF ingestion failed: {type(exc).__name__}: {exc}",
+        ) from exc
+    finally:
+        await file.close()
 
 @app.get("/projects/{project_id}/memory")
 @limiter.limit("30/minute")
 async def get_memory(request: Request, project_id: int, api_key: str = Depends(validate_api_key)):
-    """Get accumulated project memory — prior research and analysis summaries."""
     if not _project_exists(project_id):
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+        raise HTTPException(404, "Project not found")
 
     from memory.project import load_project_memory
 
@@ -245,6 +554,14 @@ async def get_memory(request: Request, project_id: int, api_key: str = Depends(v
         "research_summaries": len(prior["research_summaries"]),
         "analysis_summaries": len(prior["analysis_summaries"]),
         "prior_reports": len(prior["prior_reports"]),
-        "most_recent_research": prior["research_summaries"][-1][:300] if prior["research_summaries"] else None,
-        "most_recent_analysis": prior["analysis_summaries"][-1][:300] if prior["analysis_summaries"] else None,
+        "most_recent_research": (
+            prior["research_summaries"][-1][:300]
+            if prior["research_summaries"]
+            else None
+        ),
+        "most_recent_analysis": (
+            prior["analysis_summaries"][-1][:300]
+            if prior["analysis_summaries"]
+            else None
+        ),
     }
