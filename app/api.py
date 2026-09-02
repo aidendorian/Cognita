@@ -5,21 +5,31 @@ from pathlib import Path
 from memory.conversation import create_chat, save_messages
 from memory.project import save_project_memory
 import psycopg
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-
+from app.runs import upsert_run, get_run
 from config.env import db_url
 from tools.filesystem import FileSystem
+from contextlib import asynccontextmanager
+from graphs.checkpointer import get_checkpointer
+from memory.knowledge_graph import shutdown_graphiti
+
+MAX_FILE_SIZE = 50 * 1024 * 1024
+ALLOWED_MIME_TYPES = {"application/pdf"}
+
+@asynccontextmanager
+async def lifespan(app):
+    get_checkpointer()
+    yield
+    shutdown_graphiti()
 
 app = FastAPI(
     title="ResearchPlatform API",
+    lifespan=lifespan,
     description="Multi-agent research platform — create projects, run workflows, get reports",
     version="0.1.0",
 )
-
-_runs: dict[int, dict] = {}
-_runs_lock = threading.Lock()
 
 class ProjectCreate(BaseModel):
     name: str
@@ -31,7 +41,7 @@ class IngestURLRequest(BaseModel):
     url: str
 
 def _get_conn():
-    return psycopg.connect(db_url)
+    return psycopg.connect(db_url) #type: ignore
 
 def _project_exists(project_id: int) -> bool:
     with _get_conn() as conn:
@@ -42,12 +52,10 @@ def _project_exists(project_id: int) -> bool:
 
 def _run_workflow_background(project_id: int, task: str) -> None:
     """Runs in a background thread — updates _runs dict as it progresses."""
-    with _runs_lock:
-        _runs[project_id] = {"status": "running", "task": task, "final_output": None, "error": None}
 
     try:
         from graphs.graph import app as graph_app
-
+        upsert_run(project_id, "running", task=task)
         thread_id = f"project-{project_id}-{uuid.uuid4().hex[:8]}"
 
         initial_state = {
@@ -82,23 +90,12 @@ def _run_workflow_background(project_id: int, task: str) -> None:
         save_messages(chat_id, result["messages"])
         save_project_memory(project_id, result) #type: ignore
 
-        with _runs_lock:
-            _runs[project_id] = {
-                "status": result.get("status", "complete"),
-                "task": task,
-                "final_output": result.get("final_output"),
-                "error": None,
-            }
+        final_output = result.get("final_output")
+        upsert_run(project_id, "complete", task=task, final_output=final_output)
 
     except Exception as e:
-        with _runs_lock:
-            _runs[project_id] = {
-                "status": "failed",
-                "task": task,
-                "final_output": None,
-                "error": str(e),
-            }
-
+        upsert_run(project_id, "error", task=task, error=str(e))
+        
 @app.get("/")
 async def root():
     return {"name": "ResearchPlatform API", "version": "0.1.0", "status": "running"}
@@ -126,47 +123,28 @@ async def list_projects():
     return [{"id": r[0], "name": r[1], "created_at": str(r[2])} for r in rows]
 
 @app.post("/projects/{project_id}/run")
-async def run_workflow(project_id: int, body: RunRequest, background_tasks: BackgroundTasks):
-    """
-    Start a research workflow for a project.
-    Returns immediately — poll /projects/{id}/status to track progress.
-    """
+async def run_workflow(project_id: int, body: RunRequest):
     if not _project_exists(project_id):
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
-
-    with _runs_lock:
-        current = _runs.get(project_id, {})
-        if current.get("status") == "running":
-            raise HTTPException(status_code=409, detail="A workflow is already running for this project")
-
-    background_tasks.add_task(_run_workflow_background, project_id, body.task)
-
+        raise HTTPException(404, "Project not found")
+    
+    thread = threading.Thread(
+        target=_run_workflow_background,
+        args=(project_id, body.task),
+        daemon=True
+    )
+    thread.start()
+    
     return {
         "project_id": project_id,
-        "status": "started",
-        "task": body.task,
-        "message": f"Workflow started — poll /projects/{project_id}/status for updates",
+        "status": "started"
     }
 
 @app.get("/projects/{project_id}/status")
 async def get_status(project_id: int):
-    """Poll workflow status for a project."""
-    if not _project_exists(project_id):
-        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
-
-    with _runs_lock:
-        run = _runs.get(project_id)
-
-    if run is None:
-        return {"project_id": project_id, "status": "no_run", "message": "No workflow has been started yet"}
-
-    return {
-        "project_id": project_id,
-        "status": run["status"],
-        "task": run["task"],
-        "has_output": bool(run.get("final_output")),
-        "error": run.get("error"),
-    }
+    run = get_run(project_id)
+    if not run:
+        raise HTTPException(404, "No run found for this project")
+    return run
 
 @app.get("/projects/{project_id}/report")
 async def get_report(project_id: int):
@@ -202,11 +180,7 @@ async def get_report(project_id: int):
 
 
 @app.post("/projects/{project_id}/ingest")
-async def ingest_source(
-    project_id: int,
-    url: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None),
-):
+async def ingest_source(project_id: int, url: Optional[str] = Form(None), file: Optional[UploadFile] = File(None)):
     """
     Ingest a URL or PDF file into the project's knowledge base.
     Pass either `url` (form field) or `file` (multipart upload), not both.
@@ -220,7 +194,7 @@ async def ingest_source(
     if not url and not file:
         raise HTTPException(status_code=400, detail="Pass either url or file")
 
-    from rag.ingest import ingest_url, ingest_pdf, ingest_text
+    from rag.ingest import ingest_url, ingest_pdf
 
     if url:
         try:
@@ -240,7 +214,6 @@ async def ingest_source(
             return {"project_id": project_id, "source": filename, "chunks_stored": chunks}
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"PDF ingestion failed: {e}")
-
 
 @app.get("/projects/{project_id}/memory")
 async def get_memory(project_id: int):
