@@ -7,6 +7,7 @@ from graphiti_core import Graphiti
 from graphiti_core.llm_client.gemini_client import GeminiClient
 from graphiti_core.llm_client.config import LLMConfig
 from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
+from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
 from config.env import neo4j_uri, neo4j_user, neo4j_password, api_key, llm_model
 from graphiti_core.nodes import EpisodeType
 
@@ -51,7 +52,7 @@ def _get_graphiti():
 
     embedder_config = GeminiEmbedderConfig(
         api_key=api_key,
-        embedding_model="models/text-embedding-004",
+        embedding_model="gemini-embedding-001",
     )
 
     _graphiti = Graphiti(
@@ -60,6 +61,7 @@ def _get_graphiti():
         password=neo4j_password,
         llm_client=GeminiClient(config=llm_config),
         embedder=GeminiEmbedder(config=embedder_config),
+        cross_encoder=GeminiRerankerClient(config=llm_config)
     )
     print("[graphiti] initialized with native Gemini backend")
     return _graphiti
