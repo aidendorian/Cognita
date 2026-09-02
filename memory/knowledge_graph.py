@@ -115,8 +115,12 @@ def search_knowledge_graph(query: str, project_id: int, num_results: int = 5) ->
         return [
             {
                 "fact": getattr(r, "fact", str(r)),
-                "context": getattr(r, "source_description", ""),
+                "name": getattr(r, "name", ""),
                 "uuid": str(getattr(r, "uuid", "")),
+                "source_node_uuid": str(getattr(r, "source_node_uuid", "")),
+                "target_node_uuid": str(getattr(r, "target_node_uuid", "")),
+                "valid_at": getattr(r, "valid_at", None),
+                "invalid_at": getattr(r, "invalid_at", None),
             }
             for r in raw
         ]
