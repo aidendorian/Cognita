@@ -10,10 +10,11 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USERNAME} -d ${DATABASE_NAME}"] 
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USERNAME} -d ${DATABASE_NAME}"]
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
 
   neo4j:
     image: neo4j:5.26
@@ -32,17 +33,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  api:
-    build: .
-    ports:
-      - "8000:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
-    command: uvicorn app.api:app --host 0.0.0.0 --port 8000
 
 volumes:
   pgdata:
