@@ -2,6 +2,9 @@ import json
 import psycopg
 from config.env import db_url
 from rag.embeddings import embed_text
+from rag.reranker import Reranker
+
+reranker = Reranker()
 
 def _vector_search(cur, query_vector: list[float], project_id: int, top_k: int) -> list[tuple]:
     vector_str = json.dumps(query_vector)
@@ -65,4 +68,11 @@ def retrieve(query: str, project_id: int, top_k: int = 5) -> list[dict]:
             vector_rows = _vector_search(cur, query_vector, project_id, top_k * 2)
             bm25_rows = _bm25_search(cur, query, project_id, top_k * 2)
 
-    return _rrf(vector_rows, bm25_rows, top_k)
+
+    rrf_results = _rrf(vector_rows, bm25_rows, top_k * 2)
+    
+    if len(rrf_results) >= top_k * 2:
+        final_results = reranker.rerank(query, rrf_results)
+    else:
+        final_results = rrf_results[:top_k]
+    return final_results
