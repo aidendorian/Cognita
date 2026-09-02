@@ -1,10 +1,7 @@
 from langgraph.graph import StateGraph, START, END
-import psycopg_pool
-from psycopg.rows import dict_row
 from graphs.state import State
 from graphs.nodes import entry, planner, researcher, coder, analyst, writer, reviewer, critic
-from langgraph.checkpoint.postgres import PostgresSaver
-from config.env import db_url
+from graphs.checkpointer import _checkpointer
 
 def planner_router(state: State) -> str:
     return str(state["next_agent"])
@@ -13,9 +10,6 @@ def reviewer_router(state: State) -> str:
     if state.get("final_output"):
         return "end"
     if state.get("status") == "accepted_at_limit":
-        return "end"
-    revision_count = state.get("revision_count") or 0
-    if revision_count >= 2:
         return "end"
     return "writer"
 
@@ -59,14 +53,5 @@ graph.add_conditional_edges(
     }
 )
 
-_pool = psycopg_pool.ConnectionPool(
-    conninfo=db_url,
-    min_size=1,
-    max_size=5,
-    kwargs={"autocommit": True, "row_factory": dict_row},
-    open=True,
-)
-
-checkpointer = PostgresSaver(_pool)  # type: ignore
-checkpointer.setup()
-app = graph.compile(checkpointer=checkpointer)
+_checkpointer.setup()
+app = graph.compile(checkpointer=_checkpointer)
