@@ -4,7 +4,7 @@ from graphs.state import State
 
 def save_project_memory(project_id: int, state: State) -> None:
 
-    to_save = [("researcher", state.get("research_summary"), state.get("research_output")),("analyst", state.get("analysis_summary"), state.get("analysis"))]
+    to_save = [("researcher", state.get("research_summary"), state.get("research_output")),("analyst", state.get("analysis_summary"), state.get("analysis")), ("critic", state.get("novelty_report"), state.get("novelty_report"))]
 
     with psycopg.connect(db_url) as conn:
         with conn.cursor() as cur:
@@ -58,6 +58,7 @@ def load_project_memory(project_id: int) -> dict:
         "research_summaries": [],
         "analysis_summaries": [],
         "prior_reports": [],
+        "critic_reports": [],
     }
 
     for agent, content in rows:
@@ -67,5 +68,7 @@ def load_project_memory(project_id: int) -> dict:
             result["analysis_summaries"].append(content)
         elif agent == "writer":
             result["prior_reports"].append(content)
+        elif agent == "critic":
+            result["critic_reports"].append(content)
 
     return result
