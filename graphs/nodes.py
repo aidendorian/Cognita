@@ -11,6 +11,7 @@ from tools.python_exec import PythonSandbox
 from tools.search import search as web_search
 from langfuse import observe
 from observability.langfuse import get_client
+from memory.knowledge_graph import add_research_episode, search_knowledge_graph
 from pathlib import Path
 import re
 
@@ -114,8 +115,7 @@ def planner(state: State) -> dict:
     - analyst : interprets findings, identifies patterns, draws conclusions, flags gaps
     - critic : novelty check — searches Semantic Scholar, compares to existing literature
                    Use before writing if task_mode=paper and no novelty_report yet
-    - end : all research is complete and ready for writing
-                   (writing and review happen automatically after you route to "end")
+    - end : - end : research phase complete — writing will begin automatically
 
     CURRENT STATE:
     - Research summary : {"done — " + mask(state.get("research_summary"), 150) if state.get("research_summary") else "not done"}
@@ -126,7 +126,7 @@ def planner(state: State) -> dict:
     - Output files     : {", ".join(state.get("output_files") or []) or "none"}
 
     ROUTING GUIDANCE:
-    - Route to "end" only when research is genuinely complete and sufficient for writing
+    - Route to "end" only when research is genuinely complete and sufficient for writing and review notes and analysis are addressed.
     - It is correct to loop: researcher → analyst → researcher when analysis reveals gaps
     - For task_mode=paper with no novelty_report: route to critic before ending
     - If reviewer sent the draft back with notes needing NEW FACTS: route to researcher
@@ -213,6 +213,12 @@ def researcher(state: State) -> dict:
 
     web_context = "\n\n".join(f"<retrieved_document source='{r.get('url', '')}'>\n{r.get('content', '')[:400]}\n</retrieved_document>" for r in search_results) if search_results else "No web results."
 
+    graph_facts = search_knowledge_graph(
+        query=str(state["current_step"]),
+        project_id=state["project_id"]
+    )
+    graph_context = "\n".join(f"- {f['fact']}" for f in graph_facts) if graph_facts else "None yet."
+
     prompt = f"""
     You are a research specialist agent.
 
@@ -233,6 +239,9 @@ def researcher(state: State) -> dict:
     
     ACCUMULATED KNOWLEDGE FROM PRIOR SESSIONS:
     {prior_context if prior_context else "No prior sessions yet — this is the first run."}
+    
+    KNOWLEDGE GRAPH FACTS FROM PRIOR SESSIONS:
+    {graph_context}
     
     Using the retrieved context above as your primary source, produce a comprehensive 
     research report covering:
@@ -257,6 +266,13 @@ def researcher(state: State) -> dict:
             "has_prior_research": str(bool(state.get("research_output"))),
             "response_length": str(len(str(response))),
         }
+    )
+
+    add_research_episode(
+        project_id=state["project_id"],
+        content=str(response),
+        source="researcher",
+        task=str(state["current_step"]),
     )
 
     return {
@@ -411,6 +427,13 @@ def analyst(state: State) -> dict:
         }
     )
 
+    add_research_episode(
+        project_id=state["project_id"],
+        content=str(response),
+        source="analyst",
+        task=str(state["current_step"]),
+    )
+
     return {
         "analysis": response,
         "analysis_summary": summary,
@@ -420,13 +443,13 @@ def analyst(state: State) -> dict:
 @observe(name="writer", capture_input=False, capture_output=False)
 def writer(state: State) -> dict:
     revision_count = (state.get("revision_count") or 0) + 1
-
+    current_step = state.get("current_step") or "Write the research report"
     prompt = f"""
     You are an expert research writing agent. You produce clear, well-structured,
     original research documents in markdown format.
 
     OVERALL GOAL : {state["task"]}
-    CURRENT TASK : {state["current_step"]}
+    CURRENT TASK : {current_step}
     REVISION : {revision_count} of {MAX_REVISIONS} allowed
 
     CONTENT TO DRAW FROM:
