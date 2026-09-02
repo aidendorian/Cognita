@@ -19,10 +19,10 @@ class ValidateENV(BaseSettings):
     neo4j_uri: str = Field("bolt://localhost:7687", validation_alias="NEO4J_URI")
     neo4j_user: str = Field("neo4j", validation_alias="NEO4J_USER")
     neo4j_password: str = Field(..., validation_alias="NEO4J_PASSWORD", min_length=1)
+    db_host: str = Field("localhost", validation_alias="DATABASE_HOST")
     
-    @property
     def db_url(self) -> str:
-        return f"postgresql://{self.db_username}:{self.db_password}@localhost:5432/{self.db_name}"
+        return f"postgresql://{self.db_username}:{self.db_password}@{self.db_host}:5432/{self.db_name}"
     
 try:
     validate = ValidateENV()  # type: ignore
@@ -50,3 +50,4 @@ langfuse_base_url = validate.langfuse_base_url
 neo4j_uri = validate.neo4j_uri
 neo4j_user = validate.neo4j_user
 neo4j_password = validate.neo4j_password
+db_host = validate.db_host

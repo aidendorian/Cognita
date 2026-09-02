@@ -46,3 +46,14 @@ CREATE TABLE IF NOT EXISTS summaries (
     raw_length INT,
     created_at TIMESTAMP DEFAULT now()
 );
+
+CREATE TABLE runs (
+    id SERIAL PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    status VARCHAR(20) NOT NULL,
+    task TEXT NOT NULL,
+    final_output TEXT,
+    error TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
