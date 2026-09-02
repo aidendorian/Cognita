@@ -1,7 +1,7 @@
 import json
 from rag.retriever import retrieve
 from graphs.state import State
-from config.llm import LLM, mask
+from config.llm import mask
 from tools.filesystem import FileSystem
 from memory.project import load_project_memory
 from memory.summaries import format_prior_memory
@@ -10,15 +10,29 @@ from rag.ingest import ingest_text
 from tools.python_exec import PythonSandbox
 from tools.search import search as web_search
 from langfuse import observe
-from observability.langfuse import get_client
 from memory.knowledge_graph import add_research_episode, search_knowledge_graph
 from pathlib import Path
 import re
 
-llm = LLM()
+_llm = None
+_client = None
+
+def get_llm():
+    global _llm
+    if _llm is None:
+        from config.llm import LLM
+        _llm = LLM()
+    return _llm
+
+def get_langfuse_client():
+    global _langfuse_client
+    if _client is None:
+        from observability.langfuse import get_client
+        _langfuse_client = get_client()
+    return _langfuse_client
+
 VALID_AGENTS = {"researcher", "coder", "analyst", "critic", "end"}
 MAX_REVISIONS = 2
-_ = get_client()
 
 def _multi_retrieve(queries: list[str], project_id: int, top_k: int = 5) -> list[dict]:
     seen = set()
@@ -73,7 +87,7 @@ def entry(state: State) -> dict:
     if not any(m.get("content") == state["task"] for m in existing if isinstance(m, dict)):
         new_messages.append({"role": "user", "content": state["task"]})
         
-    _.update_current_span(
+    get_langfuse_client().update_current_span(
         metadata={
             "project_id": str(state["project_id"]),
             "task_length": str(len(state["task"])),
@@ -140,7 +154,7 @@ def planner(state: State) -> dict:
         "reasoning": "one sentence explaining why"
     }}
     """
-    response = llm.generate(prompt, max_output_tokens=1024)
+    response = get_llm().generate(prompt, max_output_tokens=1024)
 
     try:
         data = _extract_json(str(response))
@@ -168,7 +182,7 @@ def planner(state: State) -> dict:
         print("[planner] WARNING: 'end' with no research — overriding to researcher")
         next_agent = "researcher"
 
-    _.update_current_span(
+    get_langfuse_client().update_current_span(
         metadata={
             "next_agent": next_agent,
             "llm_agent": llm_agent,
@@ -254,10 +268,10 @@ def researcher(state: State) -> dict:
     Prioritize information from the retrieved context over general knowledge.
     Write clearly and thoroughly.
     """
-    response = llm.generate(prompt, max_output_tokens=5000)
+    response = get_llm().generate(prompt, max_output_tokens=5000)
     summary = mask(str(response), limit=1500)
     
-    _.update_current_span(
+    get_langfuse_client().update_current_span(
         metadata={
             "project_id": str(state["project_id"]),
             "task": str(state["task"])[:100],
@@ -310,7 +324,7 @@ def coder(state: State) -> dict:
     
     MAX_CODE_RETRIES = 3
 
-    code = str(llm.generate(prompt, max_output_tokens=8192))
+    code = str(get_llm().generate(prompt, max_output_tokens=8192))
     sandbox = PythonSandbox(project_id=state["project_id"])
     execution = sandbox.run(code)
 
@@ -330,16 +344,17 @@ def coder(state: State) -> dict:
         Return ONLY raw Python code. No markdown, no explanation.
         """
         
-        code = str(llm.generate(fix_prompt, max_output_tokens=8192))
+        code = str(get_llm().generate(fix_prompt, max_output_tokens=8192))
         execution = sandbox.run(code)
     
-    output_files = ", ".join(state.get("output_files") or []) or "None."
+    output_files = _get_output_files(state["project_id"])
+    output_files_str = ", ".join(output_files) or "None."
                     
     if execution["success"]:
         result = (
             f"Code ran successfully after {attempt} fix(es).\n"
             f"Output:\n{execution['stdout']}\n"
-            f"Files: {output_files}"
+            f"Files: {output_files_str}"
         )
     else:
         result = (
@@ -348,7 +363,7 @@ def coder(state: State) -> dict:
             f"The planner will decide whether to retry or continue."
         )
         
-    _.update_current_span(
+    get_langfuse_client().update_current_span(
         metadata={
             "execution_success": str(execution["success"]),
             "attempt_count": str(attempt),
@@ -415,10 +430,10 @@ def analyst(state: State) -> dict:
 
     Be specific. Avoid vague statements. This analysis directly shapes the final report.
     """
-    response = llm.generate(prompt, max_output_tokens=5000)
+    response = get_llm().generate(prompt, max_output_tokens=5000)
     summary = mask(str(response), limit=1500)
     
-    _.update_current_span(
+    get_langfuse_client().update_current_span(
         metadata={
             "has_csv_data": str(bool(csv_content)),
             "project_id": str(state["project_id"]),
@@ -475,12 +490,12 @@ def writer(state: State) -> dict:
     
     Return ONLY valid markdown. No preamble, no commentary outside the document.
     """
-    response = llm.generate(prompt)
+    response = get_llm().generate(prompt)
     fs = FileSystem(project_id=state["project_id"])
     filename = f"outputs/draft_v{revision_count}.md"
     fs.write(filename, str(response))
     
-    _.update_current_span(
+    get_langfuse_client().update_current_span(
         metadata={
             "revision_count": str(revision_count),
             "draft_length": str(len(str(response))),
@@ -556,7 +571,7 @@ def reviewer(state: State) -> dict:
     If verdict is "APPROVED", issues must be an empty list [].
     If verdict is "NEEDS_REVISION", issues must contain at least one specific, actionable item.
     """
-    response = llm.generate(prompt, max_output_tokens=8192)
+    response = get_llm().generate(prompt, max_output_tokens=8192)
     
     approved = False
     review_notes = ""
@@ -599,9 +614,9 @@ def reviewer(state: State) -> dict:
     
     if approved:
         fs = FileSystem(project_id=state["project_id"])
-        fs.write("outputs/final_report.md", state.get("draft", "")) #type: ignore
+        fs.write("outputs/final_report.md", state.get("draft")) #type: ignore
         
-    _.update_current_span(
+    get_langfuse_client().update_current_span(
         metadata={
             "verdict": "APPROVED" if approved else "NEEDS_REVISION",
             "issues_count": str(len(issues) if not approved else 0),
@@ -684,9 +699,9 @@ def critic(state: State) -> dict:
 
     Be specific and actionable. The writer will read this report before drafting.
     """
-    response = llm.generate(prompt, max_output_tokens=2048)
+    response = get_llm().generate(prompt, max_output_tokens=2048)
     
-    _.update_current_span(
+    get_langfuse_client().update_current_span(
         metadata={
             "papers_found": str(len(papers) if papers else 0),
             "api_error": str(api_error),
