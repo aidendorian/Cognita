@@ -14,6 +14,7 @@ from graphiti_core.nodes import EpisodeType
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _loop_thread: Optional[threading.Thread] = None
 _graphiti = None
+_graphiti_lock = threading.Lock()
 
 def _start_background_loop() -> asyncio.AbstractEventLoop:
     global _loop_thread
@@ -43,6 +44,9 @@ def _get_graphiti():
     global _graphiti
     if _graphiti is not None:
         return _graphiti
+    with _graphiti_lock:
+        if _graphiti is not None:
+            return _graphiti
 
     llm_config = LLMConfig(
         api_key=api_key,
@@ -91,7 +95,7 @@ def add_research_episode(project_id: int, content: str, source: str = "researche
             source=EpisodeType.text,
             reference_time=datetime.now(timezone.utc),
             source_description=f"source={source} task={task[:100]}",
-            group_id=f"project_{project_id}",  # project isolation
+            group_id=f"project_{project_id}",
         )
 
     try:

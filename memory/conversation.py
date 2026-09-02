@@ -2,7 +2,7 @@ import psycopg
 from config.env import db_url
 
 def create_chat(project_id: int) -> int:
-    with psycopg.connect(db_url) as conn:
+    with psycopg.connect(db_url) as conn: #type: ignore
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO chats (project_id) VALUES (%s) RETURNING id",
@@ -15,9 +15,8 @@ def create_chat(project_id: int) -> int:
 def save_messages(chat_id: int, messages: list) -> None:
     if not messages:
         return
-    with psycopg.connect(db_url) as conn:
+    with psycopg.connect(db_url) as conn: #type: ignore
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM messages WHERE chat_id = %s", (chat_id,))
             for msg in messages:
                 if hasattr(msg, "type"):
                     role = "user" if msg.type == "human" else "assistant"
@@ -31,7 +30,6 @@ def save_messages(chat_id: int, messages: list) -> None:
                         (chat_id, role, content),
                     )
         conn.commit()
-
 
 def load_messages(chat_id: int) -> list[dict]:
     with psycopg.connect(db_url) as conn: #type: ignore
