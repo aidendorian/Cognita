@@ -1,4 +1,4 @@
-from app.llm import mask
+from config.llm import mask
 
 def format_prior_memory(prior: dict, limit_per_item: int = 500) -> str:
     sections = []
