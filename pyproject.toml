@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "dotenv>=0.9.9",
     "google-genai>=2.16.0",
-    "graphiti-core>=0.29.3",
+    "graphiti-core[google-genai]>=0.30.1",
     "httpx>=0.28.1",
     "ipykernel>=7.3.0",
     "langfuse>=4.15.1",

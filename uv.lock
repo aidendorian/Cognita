@@ -832,7 +832,7 @@ wheels = [
 
 [[package]]
 name = "graphiti-core"
-version = "0.29.3"
+version = "0.30.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "neo4j" },
@@ -843,9 +843,14 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "tenacity" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/af/5b/afc2c564f4bcc247720dad769096184e3c298429ea4302a6ae4635267efc/graphiti_core-0.29.3.tar.gz", hash = "sha256:c3650626c0eb61c1ba2765ce6f08900abe68ec7f984f2e098b4922ebf5e81298", size = 6978366, upload-time = "2026-07-27T20:58:03.161Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a1/5f/c59bec30bae0bfd470baddadc15bd8af7ef92e020466c272933090453b53/graphiti_core-0.30.1.tar.gz", hash = "sha256:7391424ad1e4412e99d4e1f5751da27969c1f908c87c383cef6c933dc67d13fe", size = 6970562, upload-time = "2026-09-01T19:15:08.27Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/61/e4/8273941a0e7a1a3ef4350ff810ed6ddd2d907ebdce95cbbcf2484b2c5de7/graphiti_core-0.29.3-py3-none-any.whl", hash = "sha256:0210510e8043b5b4fa57aa038934e849b2e61d31d298200b0074faf7ca793ed5", size = 361487, upload-time = "2026-07-27T20:58:00.971Z" },
+    { url = "https://files.pythonhosted.org/packages/74/a7/94b06a98f7c0bbe03021316488ca55481e8d6500a0e67b21af17b9fb39b4/graphiti_core-0.30.1-py3-none-any.whl", hash = "sha256:d7fd59c6ca01cfda45fe8e2669d30272d3d083e3ed5d62f810a72310670cdec8", size = 361453, upload-time = "2026-09-01T19:15:05.775Z" },
+]
+
+[package.optional-dependencies]
+google-genai = [
+    { name = "google-genai" },
 ]
 
 [[package]]
@@ -2144,7 +2149,7 @@ wheels = [
 
 [[package]]
 name = "posthog"
-version = "7.45.1"
+version = "7.45.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "backoff" },
@@ -2152,9 +2157,9 @@ dependencies = [
     { name = "requests" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/34/6d/8b89146eecb7cc23586e885478828eac0192aa3c19f4a3445d24f08ac8ac/posthog-7.45.1.tar.gz", hash = "sha256:40fb9c120e0787149073bea9185387557a64b843c5069929070af401e187770b", size = 503649, upload-time = "2026-08-31T07:50:56.452Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0b/57/dc169d6b05f3ea486f0a6b74deb08961687f3cd1eb36bf72cf208b0325e6/posthog-7.45.3.tar.gz", hash = "sha256:98d79f116c68c4e710ad6f97de6d66cb384347261b9046961e41e3a71122485d", size = 506164, upload-time = "2026-09-01T10:34:01.985Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/91/1d/2469561e6feb23acd1ca0932e3dcb33df42c62c8f3d28718b748605c6458/posthog-7.45.1-py3-none-any.whl", hash = "sha256:74d7c41898944fda03ea477d730b42d90cfba660d78ce4e56819a3402e11176b", size = 595373, upload-time = "2026-08-31T07:50:54.817Z" },
+    { url = "https://files.pythonhosted.org/packages/da/ff/b8cd7a5650b40335f05321e7124e7094bf3979bfa145ab6e8289cec65153/posthog-7.45.3-py3-none-any.whl", hash = "sha256:92641e86198005438daa2f83ae46f2bcd2bb5d43a34b7d63900d471239c6c5ac", size = 598437, upload-time = "2026-09-01T10:34:00.027Z" },
 ]
 
 [[package]]
@@ -2887,7 +2892,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "dotenv" },
     { name = "google-genai" },
-    { name = "graphiti-core" },
+    { name = "graphiti-core", extra = ["google-genai"] },
     { name = "httpx" },
     { name = "ipykernel" },
     { name = "langfuse" },
@@ -2906,7 +2911,7 @@ dependencies = [
 requires-dist = [
     { name = "dotenv", specifier = ">=0.9.9" },
     { name = "google-genai", specifier = ">=2.16.0" },
-    { name = "graphiti-core", specifier = ">=0.29.3" },
+    { name = "graphiti-core", extras = ["google-genai"], specifier = ">=0.30.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "ipykernel", specifier = ">=7.3.0" },
     { name = "langfuse", specifier = ">=4.15.1" },
