@@ -9,7 +9,7 @@ with open(schema_path) as f:
 
 with psycopg.connect(db_url) as conn:
     with conn.cursor() as cur:
-        cur.execute(schema_sql)
+        cur.execute(schema_sql) #type: ignore
     conn.commit()
 
 print("Schema applied successfully.")
