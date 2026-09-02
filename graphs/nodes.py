@@ -25,11 +25,11 @@ def get_llm():
     return _llm
 
 def get_langfuse_client():
-    global _langfuse_client
+    global _client
     if _client is None:
         from observability.langfuse import get_client
-        _langfuse_client = get_client()
-    return _langfuse_client
+        _client = get_client()
+    return _client
 
 VALID_AGENTS = {"researcher", "coder", "analyst", "critic", "end"}
 MAX_REVISIONS = 2
