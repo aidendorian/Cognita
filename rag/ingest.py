@@ -54,7 +54,7 @@ def _extract_pdf(path: str) -> str:
     return text
 
 def _store_chunks(chunks: list[str], project_id: int, source: str, force: bool = False) -> int:
-    with psycopg.connect(db_url) as conn:
+    with psycopg.connect(db_url) as conn: #type: ignore
         with conn.cursor() as cur:
             if not force:
                 cur.execute(
