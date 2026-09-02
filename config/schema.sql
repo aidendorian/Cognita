@@ -48,12 +48,44 @@ CREATE TABLE IF NOT EXISTS summaries (
 );
 
 CREATE TABLE runs (
-    id SERIAL PRIMARY KEY,
-    project_id INTEGER NOT NULL REFERENCES projects(id),
-    status VARCHAR(20) NOT NULL,
+    id UUID PRIMARY KEY,
+    thread_id TEXT NOT NULL UNIQUE,
+
+    project_id INTEGER NOT NULL
+        REFERENCES projects(id)
+        ON DELETE CASCADE,
+
     task TEXT NOT NULL,
+
+    current_agent TEXT NOT NULL DEFAULT 'initializing',
+    config JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (
+            status IN (
+                'pending',
+                'running',
+                'completed',
+                'failed',
+                'cancelled',
+                'interrupted',
+                'needs_review'
+            )
+        ),
+
     final_output TEXT,
+
     error TEXT,
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX idx_runs_project_created
+ON runs(project_id, created_at DESC);
+
+CREATE INDEX idx_runs_status_created
+ON runs(status, created_at ASC)
+WHERE status IN ('pending', 'running');
