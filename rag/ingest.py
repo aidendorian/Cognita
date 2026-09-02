@@ -115,32 +115,3 @@ def ingest_text(text: str, project_id: int, source_label: str, force: bool = Fal
     stored = _store_chunks(chunks, project_id, source=source_label, force=force)
     print(f"[ingest] stored {stored} chunks from {source_label!r}")
     return stored
-
-"""def ingest(source: str, project_id: int, source_label: str | None = None, source_type: str = "auto", force: bool = False) -> int:
-
-    if source_type == "auto":
-        if source.startswith("http://") or source.startswith("https://"):
-            source_type = "url"
-        elif source.lower().endswith(".pdf"):
-            source_type = "pdf"
-        else:
-            source_type = "text"
-
-    if source_type == "url":
-        if source_label is not None:
-            return ingest_url_content(source, url=source_label, project_id=project_id, force=force)
-        return ingest_url(source, project_id=project_id, force=force)
-
-    if source_type == "url_content":
-        if source_label is None:
-            raise ValueError("source_label (the URL) is required for source_type='url_content'")
-        return ingest_url_content(source, url=source_label, project_id=project_id, force=force)
-
-    if source_type == "pdf":
-        return ingest_pdf(source, project_id=project_id, force=force)
-
-    if source_type == "text":
-        label = source_label or "raw_text"
-        return ingest_text(source, project_id=project_id, source_label=label, force=force)
-
-    raise ValueError(f"Unknown source_type: {source_type!r}")"""
