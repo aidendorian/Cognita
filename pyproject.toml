@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "dotenv>=0.9.9",
+    "fastapi>=0.141.1",
     "google-genai>=2.16.0",
     "graphiti-core[google-genai]>=0.30.1",
     "httpx>=0.28.1",
@@ -18,6 +19,8 @@ dependencies = [
     "paddlepaddle>=3.3.1",
     "psycopg>=3.3.4",
     "pydantic-settings>=2.14.2",
+    "python-multipart>=0.0.32",
     "tavily-python>=0.8.0",
     "trafilatura>=2.2.0",
+    "uvicorn>=0.52.4",
 ]
