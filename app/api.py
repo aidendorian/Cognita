@@ -54,7 +54,9 @@ def _run_workflow_background(project_id: int, task: str) -> None:
     """Runs in a background thread — updates _runs dict as it progresses."""
 
     try:
-        from graphs.graph import app as graph_app
+        from graphs.graph import get_app
+        graph_app = get_app()
+        
         upsert_run(project_id, "running", task=task)
         thread_id = f"project-{project_id}-{uuid.uuid4().hex[:8]}"
 
