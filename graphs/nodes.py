@@ -1,7 +1,7 @@
 import json
 from rag.retriever import retrieve
 from graphs.state import State
-from app.llm import LLM, mask
+from config.llm import LLM, mask
 from tools.filesystem import FileSystem
 from memory.project import load_project_memory
 from memory.summaries import format_prior_memory
@@ -254,8 +254,8 @@ def researcher(state: State) -> dict:
     Prioritize information from the retrieved context over general knowledge.
     Write clearly and thoroughly.
     """
-    response = llm.generate(prompt, max_output_tokens=8192)
-    summary = llm.summarize(str(response), max_words=1500) #or mask(str(response), limit=1500)
+    response = llm.generate(prompt, max_output_tokens=5000)
+    summary = mask(str(response), limit=1500)
     
     _.update_current_span(
         metadata={
@@ -415,8 +415,8 @@ def analyst(state: State) -> dict:
 
     Be specific. Avoid vague statements. This analysis directly shapes the final report.
     """
-    response = llm.generate(prompt, max_output_tokens=8192)
-    summary = llm.summarize(str(response)) or mask(str(response), limit=500)
+    response = llm.generate(prompt, max_output_tokens=5000)
+    summary = mask(str(response), limit=1500)
     
     _.update_current_span(
         metadata={
@@ -619,6 +619,9 @@ def reviewer(state: State) -> dict:
     
 @observe(name="critic", capture_input=False, capture_output=False)
 def critic(state: State) -> dict:
+    prior = load_project_memory(state["project_id"])
+    prior_context = format_prior_memory(prior)
+    
     papers = None
     api_error = False
 
@@ -670,6 +673,8 @@ def critic(state: State) -> dict:
 
     SIMILAR EXISTING PAPERS:
     {papers_text}
+    
+    Prior Criticism: {prior_context}
 
     Produce a novelty report covering:
     1. Which existing papers are most similar and why
