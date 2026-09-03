@@ -4,7 +4,7 @@ import psycopg
 from psycopg.rows import dict_row
 from config.env import db_url
 from psycopg.types import json
-from app.api import get_pool
+from app.dependencies import get_pool
 
 VALID_STATUSES = {
     "pending",
@@ -25,7 +25,7 @@ def _validate_status(status: str) -> None:
 
 def create_run(run_id: str, project_id: int, thread_id: str, task: str, *, config: dict[str, Any] | None = None) -> None:
     """Create a new durable run record."""
-    with get_pool().connect(db_url) as conn:  # type: ignore[arg-type]
+    with get_pool().connection() as conn:  # type: ignore[arg-type]
         with conn.cursor() as cur:
             cur.execute(    
                 """
@@ -43,7 +43,6 @@ def create_run(run_id: str, project_id: int, thread_id: str, task: str, *, confi
             )
 
         conn.commit()
-
 
 def update_run(run_id: str, *, status: str | None = None, current_agent: str | None = None, final_output: str | None = None, error: str | None = None) -> None:
     """Update fields on an existing run."""
@@ -92,7 +91,7 @@ def update_run(run_id: str, *, status: str | None = None, current_agent: str | N
 def get_run(run_id: str) -> dict[str, Any] | None:
     """Fetch a run by its unique run ID."""
 
-    with get_pool().connect(db_url) as conn:  # type: ignore[arg-type]
+    with get_pool().connection() as conn:  # type: ignore[arg-type]
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
@@ -111,7 +110,7 @@ def get_run(run_id: str) -> dict[str, Any] | None:
 def get_latest_run(project_id: int) -> dict[str, Any] | None:
     """Fetch the most recently created run for a project."""
 
-    with get_pool().connect(db_url) as conn:  # type: ignore[arg-type]
+    with get_pool().connection() as conn:  # type: ignore[arg-type]
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
@@ -129,7 +128,7 @@ def get_latest_run(project_id: int) -> dict[str, Any] | None:
 
 def delete_run(run_id: str) -> bool:
     """Delete a specific run by ID."""
-    with psycopg.connect(db_url) as conn:  # type: ignore[arg-type]
+    with psycopg.connection() as conn:  # type: ignore[arg-type]
         with conn.cursor() as cur:
             cur.execute(
                 """
