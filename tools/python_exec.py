@@ -3,7 +3,7 @@ import uuid
 from tools.filesystem import FileSystem
 
 class PythonSandbox:
-    def __init__(self, project_id: int, run_id: str | None = None, timeout: int = 30):
+    def __init__(self, project_id: int, run_id: str | None = None, timeout: int = 240):
         if project_id <= 0:
             raise ValueError("project_id must be positive")
         if timeout <= 0:
@@ -44,7 +44,7 @@ class PythonSandbox:
                     "--security-opt",
                     "no-new-privileges:true",
                     "--user",
-                    "65532:65532",
+                    "1000:1000",
                     "--tmpfs",
                     "/tmp:rw,noexec,nosuid,size=64m",
                     "-v",

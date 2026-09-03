@@ -22,7 +22,7 @@ def update_run_agent(run_id: str, agent_name: str):
             """
             UPDATE runs
             SET current_agent = %s
-            WHERE run_id = %s
+            WHERE id = %s
             """,
             (agent_name, run_id),
         )

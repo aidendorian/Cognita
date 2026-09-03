@@ -1,0 +1,1252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ResearchAgent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+  <style>
+    /* ── Reset & base ── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #000000;
+      --surface: #111111;
+      --surface2: #1a1a1a;
+      --border: #333333;
+      --border2: #444444;
+      --text: #ffffff;
+      --muted: #888888;
+      --muted2: #aaaaaa;
+      --accent: #ffffff;       /* use white for accents */
+      --accent-dim: rgba(255,255,255,0.08);
+      --green: #4caf50;
+      --green-dim: rgba(76,175,80,0.15);
+      --amber: #ffa726;
+      --amber-dim: rgba(255,167,38,0.15);
+      --red: #ef5350;
+      --red-dim: rgba(239,83,80,0.15);
+      --mono: 'JetBrains Mono', monospace;
+      --sans: 'Inter', sans-serif;
+      --radius: 8px;
+      --sidebar-width: 260px;
+    }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 14px; line-height: 1.5; overflow: hidden; }
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+    /* ── Layout ── */
+    .shell { display: flex; height: 100vh; }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: var(--sidebar-width);
+      flex-shrink: 0;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .sidebar-header {
+      padding: 16px 18px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--border);
+    }
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: var(--mono);
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text);
+    }
+    .logo-icon {
+      width: 24px;
+      height: 24px;
+      border-radius: 6px;
+      background: var(--accent-dim);
+      border: 1px solid var(--border2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      color: var(--text);
+    }
+    .settings-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: 0.15s;
+    }
+    .settings-btn:hover { border-color: var(--border2); color: var(--text); background: var(--surface2); }
+
+    .projects-label {
+      padding: 12px 18px 6px;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .project-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 8px 8px;
+    }
+    .project-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      color: var(--muted2);
+      transition: 0.1s;
+    }
+    .project-item:hover { background: var(--surface2); color: var(--text); }
+    .project-item.active { background: var(--accent-dim); color: var(--text); }
+    .project-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 6px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: 600;
+      flex-shrink: 0;
+      color: var(--muted2);
+    }
+    .project-item.active .project-icon { background: var(--accent-dim); border-color: var(--border2); color: var(--text); }
+    .project-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .sidebar-footer {
+      padding: 10px 12px 14px;
+      border-top: 1px solid var(--border);
+    }
+    .new-project-btn {
+      width: 100%;
+      padding: 8px;
+      background: none;
+      border: 1px dashed var(--border2);
+      color: var(--muted);
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-family: var(--sans);
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: 0.15s;
+    }
+    .new-project-btn:hover { border-color: var(--text); color: var(--text); background: var(--accent-dim); }
+
+    /* ── Main ── */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--bg);
+    }
+
+    /* Top bar */
+    .topbar {
+      padding: 0 24px;
+      height: 56px;
+      flex-shrink: 0;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--surface);
+    }
+    .topbar-left { display: flex; align-items: center; gap: 8px; }
+    .project-title { font-size: 16px; font-weight: 600; color: var(--text); }
+    .project-crumb { font-size: 13px; color: var(--muted); }
+    .topbar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+    .chip {
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--muted2);
+      cursor: pointer;
+      transition: 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+    }
+    .chip:hover { border-color: var(--border2); color: var(--text); }
+
+    .run-btn {
+      padding: 6px 18px;
+      background: var(--text);
+      color: var(--bg);
+      border: none;
+      border-radius: 20px;
+      font-weight: 600;
+      font-size: 13px;
+      cursor: pointer;
+      transition: 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .run-btn:hover { opacity: 0.85; }
+    .run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Content */
+    .content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 24px 40px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* Empty state */
+    .empty-state {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      color: var(--muted);
+      text-align: center;
+    }
+    .empty-state .icon { font-size: 48px; opacity: 0.3; }
+    .empty-state h2 { font-weight: 400; font-size: 18px; color: var(--muted2); }
+    .empty-state p { max-width: 320px; color: var(--muted); }
+
+    /* Composer */
+    .composer {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      transition: 0.2s;
+    }
+    .composer:focus-within { border-color: var(--border2); }
+    .composer-header {
+      padding: 8px 14px 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .composer-label { font-size: 11px; color: var(--muted); font-weight: 500; }
+    .mode-pills { display: flex; gap: 4px; }
+    .mode-pill {
+      padding: 2px 10px;
+      font-size: 11px;
+      background: none;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      cursor: pointer;
+      color: var(--muted);
+      transition: 0.15s;
+    }
+    .mode-pill.active { background: var(--accent-dim); border-color: var(--border2); color: var(--text); }
+    .mode-pill:hover { color: var(--muted2); }
+
+    .task-textarea {
+      width: 100%;
+      min-height: 70px;
+      resize: none;
+      background: transparent;
+      border: none;
+      color: var(--text);
+      font-size: 14px;
+      font-family: var(--sans);
+      padding: 8px 14px 4px;
+      outline: none;
+      line-height: 1.6;
+    }
+    .task-textarea::placeholder { color: var(--border2); }
+
+    .composer-footer {
+      padding: 6px 14px 10px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-top: 1px solid var(--border);
+    }
+    .composer-actions { display: flex; align-items: center; gap: 8px; }
+    .ingest-status { font-size: 11px; color: var(--green); }
+    .mode-hint { font-size: 11px; color: var(--muted); }
+
+    /* Pipeline (compact) */
+    .pipeline-wrap { display: none; }
+    .pipeline-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+    }
+    .pipeline-head {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .pipeline-title { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .pipeline-elapsed { font-size: 12px; font-family: var(--mono); color: var(--muted); }
+
+    .pipeline-track {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      position: relative;
+      padding: 0 4px;
+    }
+    .pipeline-track::before {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 10px;
+      right: 10px;
+      height: 1px;
+      background: var(--border);
+      transform: translateY(-50%);
+      z-index: 0;
+    }
+    .p-node {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      flex: 1;
+      position: relative;
+      z-index: 1;
+      gap: 4px;
+    }
+    .p-node-ring {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      border: 1.5px solid var(--border);
+      background: var(--bg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: 0.25s;
+    }
+    .p-node-ring svg { width: 12px; height: 12px; stroke: var(--muted); fill: none; stroke-width: 1.5; }
+    .p-node-name { font-size: 8px; font-family: var(--mono); color: var(--muted); white-space: nowrap; }
+
+    .p-node.done .p-node-ring { border-color: var(--green); background: var(--green-dim); }
+    .p-node.done .p-node-ring svg { stroke: var(--green); }
+    .p-node.done .p-node-name { color: var(--green); }
+
+    .p-node.active .p-node-ring { border-color: var(--text); background: var(--accent-dim); }
+    .p-node.active .p-node-ring svg { stroke: var(--text); }
+    .p-node.active .p-node-name { color: var(--text); font-weight: 500; }
+    .p-node.active .p-node-ring::after {
+      content: '';
+      position: absolute;
+      inset: -4px;
+      border-radius: 50%;
+      border: 1px solid var(--text);
+      opacity: 0.3;
+      animation: ripple 1.6s ease-out infinite;
+    }
+    @keyframes ripple { 0% { transform: scale(0.8); opacity: 0.5; } 100% { transform: scale(1.4); opacity: 0; } }
+
+    .pipeline-bar {
+      margin-top: 10px;
+      padding: 6px 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: var(--muted);
+    }
+    .status-dot.running { background: var(--text); animation: blink 1.2s infinite; }
+    .status-dot.done { background: var(--green); }
+    .status-dot.warn { background: var(--amber); }
+    .status-dot.err { background: var(--red); }
+    @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.2; } }
+    .status-msg { color: var(--muted2); flex: 1; }
+    .status-msg span { color: var(--text); font-family: var(--mono); }
+
+    /* Runs */
+    .runs-wrap { display: none; }
+    .runs-head {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .section-title { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .run-count { font-size: 11px; font-family: var(--mono); color: var(--muted); }
+
+    .run-list { display: flex; flex-direction: column; gap: 4px; }
+    .run-card {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      border-radius: var(--radius);
+      border: 1px solid transparent;
+      background: var(--surface);
+      cursor: pointer;
+      transition: 0.14s;
+    }
+    .run-card:hover { border-color: var(--border); background: var(--surface2); }
+    .run-card.selected { border-color: var(--border2); background: var(--accent-dim); }
+    .run-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .s-pending { background: var(--border2); }
+    .s-running { background: var(--text); animation: blink 1.1s infinite; }
+    .s-completed { background: var(--green); }
+    .s-needs_review { background: var(--amber); }
+    .s-failed { background: var(--red); }
+    .s-cancelled, .s-interrupted { background: var(--muted); }
+
+    .run-task { flex: 1; font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .run-meta { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    .run-time { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+    .badge {
+      font-size: 10px; font-weight: 500; padding: 1px 8px; border-radius: 4px;
+      font-family: var(--mono);
+    }
+    .b-pending { background: rgba(136,136,136,0.2); color: var(--muted2); }
+    .b-running { background: var(--accent-dim); color: var(--text); }
+    .b-completed { background: var(--green-dim); color: var(--green); }
+    .b-needs_review { background: var(--amber-dim); color: var(--amber); }
+    .b-failed { background: var(--red-dim); color: var(--red); }
+    .b-cancelled, .b-interrupted { background: rgba(136,136,136,0.15); color: var(--muted); }
+
+    /* Report */
+    .report-wrap { display: none; }
+    .report-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+    .report-head {
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--surface2);
+    }
+    .report-head-left { display: flex; align-items: center; gap: 10px; }
+    .report-label { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+    .report-body {
+      padding: 20px 24px;
+      font-size: 13.5px;
+      line-height: 1.8;
+      max-height: 420px;
+      overflow-y: auto;
+      color: var(--text);
+    }
+    .report-body h1 { font-size: 1.3em; font-weight: 600; margin: 1.2em 0 0.4em; border-bottom: 1px solid var(--border); padding-bottom: 0.2em; }
+    .report-body h2 { font-size: 1.1em; font-weight: 600; margin: 1em 0 0.3em; }
+    .report-body h3 { font-size: 1em; font-weight: 600; color: var(--muted2); margin: 0.8em 0 0.2em; }
+    .report-body p { margin: 0.6em 0; }
+    .report-body ul, .report-body ol { padding-left: 1.5em; margin: 0.5em 0; }
+    .report-body li { margin: 0.2em 0; }
+    .report-body code { font-family: var(--mono); font-size: 0.85em; background: var(--surface2); padding: 2px 6px; border-radius: 4px; color: var(--text); }
+    .report-body pre { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; overflow-x: auto; margin: 0.8em 0; }
+    .report-body pre code { background: none; padding: 0; color: var(--text); }
+    .report-body blockquote { border-left: 2px solid var(--text); padding-left: 14px; color: var(--muted2); margin: 0.8em 0; font-style: italic; }
+    .report-body strong { color: var(--text); font-weight: 600; }
+    .report-body a { color: var(--text); text-decoration: underline; }
+    .report-body hr { border: none; border-top: 1px solid var(--border); margin: 1.2em 0; }
+    .report-body table { border-collapse: collapse; width: 100%; margin: 0.8em 0; font-size: 0.9em; }
+    .report-body th { background: var(--surface2); padding: 6px 10px; text-align: left; font-weight: 600; border: 1px solid var(--border); }
+    .report-body td { padding: 6px 10px; border: 1px solid var(--border); }
+
+    /* Run banner */
+    .run-banner {
+      display: none;
+      padding: 8px 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      align-items: center;
+      gap: 12px;
+    }
+    .banner-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text); animation: blink 1.1s infinite; flex-shrink: 0; }
+    .banner-msg { flex: 1; font-size: 13px; color: var(--muted2); }
+    .banner-msg b { color: var(--text); }
+    .banner-agent { font-family: var(--mono); font-size: 12px; color: var(--text); }
+    .cancel-btn {
+      padding: 3px 12px;
+      font-size: 11px;
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: 4px;
+      cursor: pointer;
+      transition: 0.15s;
+    }
+    .cancel-btn:hover { border-color: var(--red); color: var(--red); }
+
+    .alert-box {
+      padding: 10px 14px;
+      border-radius: var(--radius);
+      font-size: 12px;
+      border: 1px solid transparent;
+    }
+    .alert-warn { background: var(--amber-dim); border-color: rgba(255,167,38,0.2); color: var(--amber); }
+    .alert-err { background: var(--red-dim); border-color: rgba(239,83,80,0.2); color: var(--red); font-family: var(--mono); }
+
+    /* Modals */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.8);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 200;
+      backdrop-filter: blur(2px);
+    }
+    .modal-backdrop.hidden { display: none; }
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border2);
+      border-radius: 12px;
+      padding: 24px;
+      width: 420px;
+      max-width: 92vw;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.7);
+    }
+    .modal-title { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+    .modal-sub { font-size: 12px; color: var(--muted); margin-bottom: 16px; }
+    .modal-input {
+      width: 100%;
+      padding: 8px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 6px;
+      font-size: 13px;
+      outline: none;
+      transition: 0.15s;
+    }
+    .modal-input:focus { border-color: var(--border2); }
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+    .btn {
+      padding: 6px 16px;
+      font-size: 13px;
+      font-weight: 500;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: 0.15s;
+      border: none;
+    }
+    .btn-primary { background: var(--text); color: var(--bg); }
+    .btn-primary:hover { opacity: 0.85; }
+    .btn-ghost { background: none; border: 1px solid var(--border); color: var(--muted2); }
+    .btn-ghost:hover { color: var(--text); border-color: var(--border2); }
+
+    /* Memory grid */
+    .mem-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 6px 0; }
+    .mem-card { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; }
+    .mem-num { font-size: 24px; font-weight: 600; font-family: var(--mono); color: var(--text); line-height: 1; }
+    .mem-label { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+    /* Toasts */
+    .toast-shelf {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      z-index: 500;
+    }
+    .toast {
+      padding: 8px 16px;
+      background: var(--surface);
+      border: 1px solid var(--border2);
+      border-radius: 6px;
+      font-size: 12px;
+      color: var(--text);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+      animation: toastIn 0.2s ease;
+    }
+    .toast.ok { border-color: rgba(76,175,80,0.4); color: var(--green); }
+    .toast.err { border-color: rgba(239,83,80,0.3); color: var(--red); }
+    @keyframes toastIn { from { transform: translateY(8px) scale(0.96); opacity: 0; } to { transform: none; opacity: 1; } }
+
+    /* misc */
+    input[type="file"] { display: none; }
+    .hidden { display: none !important; }
+
+    /* responsive */
+    @media (max-width: 720px) {
+      .sidebar { width: 60px; }
+      .sidebar .logo span, .sidebar .projects-label, .sidebar .project-name, .sidebar .new-project-btn span { display: none; }
+      .sidebar .project-item { justify-content: center; padding: 8px; }
+      .sidebar .project-icon { margin: 0; }
+      .sidebar .new-project-btn { justify-content: center; }
+      .topbar { flex-wrap: wrap; height: auto; padding: 8px 16px; gap: 6px; }
+      .topbar-right { flex-wrap: wrap; }
+      .content { padding: 12px 16px; }
+    }
+  </style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">
+        <div class="logo-icon">⬡</div>
+        <span>research<span style="color:var(--muted);">agent</span></span>
+      </div>
+      <button class="settings-btn" id="settingsBtn" title="Settings">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+    </div>
+
+    <div class="projects-label">Projects</div>
+    <div class="project-list" id="projectList">
+      <div style="padding:10px 12px;font-size:12px;color:var(--muted);">No projects yet</div>
+    </div>
+
+    <div class="sidebar-footer">
+      <button class="new-project-btn" id="newProjectBtn">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        <span>New project</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <!-- Empty state -->
+    <div class="empty-state" id="emptyState">
+      <div class="icon">⬡</div>
+      <h2>Select a project</h2>
+      <p>Choose a project from the sidebar or create one to start a research run.</p>
+    </div>
+
+    <!-- Project view -->
+    <div id="projectView" style="display:none;flex:1;flex-direction:column;overflow:hidden;">
+      <!-- Topbar -->
+      <div class="topbar">
+        <div class="topbar-left">
+          <span class="project-crumb">Projects /</span>
+          <span class="project-title" id="viewTitle">—</span>
+        </div>
+        <div class="topbar-right">
+          <button class="chip" id="memoryChip">📚 Memory</button>
+          <button class="chip" onclick="document.getElementById('fileInput').click()">📄 Ingest PDF</button>
+          <button class="chip" id="ingestUrlBtn">🔗 Ingest URL</button>
+          <button class="run-btn" id="startRunBtn">▶ Run</button>
+        </div>
+      </div>
+
+      <!-- Content area -->
+      <div class="content" id="mainContent">
+        <!-- Composer -->
+        <div class="composer">
+          <div class="composer-header">
+            <span class="composer-label">Research task</span>
+            <div class="mode-pills">
+              <button class="mode-pill active" id="modeSummary" onclick="setMode('summary')">Summary</button>
+              <button class="mode-pill" id="modePaper" onclick="setMode('paper')">Paper</button>
+            </div>
+          </div>
+          <textarea class="task-textarea" id="taskInput" rows="2"
+            placeholder="What do you want researched? e.g. Summarise the latest findings on PCOS treatment options."></textarea>
+          <div class="composer-footer">
+            <div class="composer-actions">
+              <span class="ingest-status" id="ingestStatus"></span>
+            </div>
+            <span class="mode-hint" id="modeHint">Summary mode · concise report</span>
+          </div>
+        </div>
+
+        <!-- Pipeline -->
+        <div class="pipeline-wrap" id="pipelineWrap">
+          <div class="pipeline-box">
+            <div class="pipeline-head">
+              <span class="pipeline-title">Pipeline</span>
+              <span class="pipeline-elapsed" id="pipelineElapsed"></span>
+            </div>
+            <div class="pipeline-track" id="pipelineTrack"></div>
+            <div class="pipeline-bar">
+              <div class="status-dot" id="statusInd"></div>
+              <span class="status-msg" id="statusMsg">—</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Active run banner -->
+        <div class="run-banner" id="runBanner">
+          <div class="banner-dot"></div>
+          <span class="banner-msg" id="bannerMsg">Running…</span>
+          <button class="cancel-btn" id="cancelBtn">Cancel</button>
+        </div>
+
+        <!-- Alerts -->
+        <div id="alertArea"></div>
+
+        <!-- Report -->
+        <div class="report-wrap" id="reportWrap">
+          <div class="report-box">
+            <div class="report-head">
+              <div class="report-head-left">
+                <span class="report-label">Report</span>
+                <span id="reportBadge"></span>
+              </div>
+              <div style="display:flex;gap:6px;">
+                <button class="cancel-btn" id="reportCancelBtn" style="display:none;">Cancel</button>
+                <button class="cancel-btn" onclick="copyReport()">Copy</button>
+              </div>
+            </div>
+            <div class="report-body" id="reportBody"></div>
+          </div>
+        </div>
+
+        <!-- Runs -->
+        <div class="runs-wrap" id="runsWrap">
+          <div class="runs-head">
+            <span class="section-title">History</span>
+            <span class="run-count" id="runCount"></span>
+          </div>
+          <div class="run-list" id="runList"></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- File input -->
+<input type="file" id="fileInput" accept=".pdf" onchange="ingestFile(event)" />
+
+<!-- Settings Modal -->
+<div class="modal-backdrop hidden" id="settingsModal">
+  <div class="modal">
+    <div class="modal-title">⚙️ Connection Settings</div>
+    <div class="modal-sub">Configure API endpoint and your key.</div>
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <div>
+        <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:2px;">API Base URL</label>
+        <input class="modal-input" id="apiBase" type="text" placeholder="http://localhost:8000" value="http://localhost:8000" />
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:2px;">API Key</label>
+        <input class="modal-input" id="apiKey" type="password" placeholder="your_api_key" />
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);">
+        <span class="status-dot" id="connDot" style="background:var(--muted);"></span>
+        <span id="connMsg">Not connected</span>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal('settingsModal')">Cancel</button>
+      <button class="btn btn-primary" id="connectBtn">Connect</button>
+    </div>
+  </div>
+</div>
+
+<!-- New Project Modal -->
+<div class="modal-backdrop hidden" id="modalNewProject">
+  <div class="modal">
+    <div class="modal-title">New Project</div>
+    <div class="modal-sub">Give your research project a name.</div>
+    <input class="modal-input" id="newProjectName" type="text" placeholder="e.g. PCOS Research" />
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal('modalNewProject')">Cancel</button>
+      <button class="btn btn-primary" onclick="createProject()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Ingest URL Modal -->
+<div class="modal-backdrop hidden" id="modalIngestUrl">
+  <div class="modal">
+    <div class="modal-title">Ingest URL</div>
+    <div class="modal-sub">Paste a web page or paper URL to add it to the project's knowledge base.</div>
+    <input class="modal-input" id="ingestUrlVal" type="url" placeholder="https://…" />
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal('modalIngestUrl')">Cancel</button>
+      <button class="btn btn-primary" onclick="submitUrl()">Ingest</button>
+    </div>
+  </div>
+</div>
+
+<!-- Memory Modal -->
+<div class="modal-backdrop hidden" id="modalMemory">
+  <div class="modal" style="width:480px;">
+    <div class="modal-title">Project Memory</div>
+    <div class="modal-sub">Accumulated knowledge injected into every new run.</div>
+    <div id="memContent"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal('modalMemory')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast shelf -->
+<div class="toast-shelf" id="toastShelf"></div>
+
+<script>
+// ═══════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════
+let projects=[], runs=[], selectedProject=null, selectedRun=null;
+let pollTimer=null, elapsedTimer=null, runStartTime=null;
+let taskMode='summary';
+
+const NODE_DEFS = [
+  {id:'entry',    label:'entry',    icon:'<circle cx="12" cy="12" r="4"/>'},
+  {id:'planner',  label:'planner',  icon:'<polygon points="12 2 2 19 22 19"/>'},
+  {id:'researcher',label:'search',  icon:'<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>'},
+  {id:'coder',    label:'coder',    icon:'<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>'},
+  {id:'analyst',  label:'analyst',  icon:'<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>'},
+  {id:'critic',   label:'critic',   icon:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>'},
+  {id:'writer',   label:'writer',   icon:'<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'},
+  {id:'reviewer', label:'review',   icon:'<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>'},
+];
+
+// ═══════════════════════════════════════════
+// API
+// ═══════════════════════════════════════════
+function base(){return(document.getElementById('apiBase').value||'http://localhost:8000').replace(/\/$/,'')}
+function key(){return document.getElementById('apiKey').value.trim()}
+
+async function api(method,path,body,isForm){
+  const headers={'X-API-Key': key()};
+  const opts={method,headers};
+  if(body&&!isForm){headers['Content-Type']='application/json';opts.body=JSON.stringify(body)}
+  if(body&&isForm){opts.body=body}
+  const res=await fetch(base()+path,opts);
+  if(!res.ok){const t=await res.text();let m=t;try{m=JSON.parse(t).detail||t}catch{}throw new Error(m)}
+  const ct=res.headers.get('content-type')||'';
+  if(ct.includes('json'))return res.json();
+  return res.text();
+}
+
+// ═══════════════════════════════════════════
+// SETTINGS (fixed recursion)
+// ═══════════════════════════════════════════
+function openSettings(){ openModal('settingsModal'); }
+
+document.getElementById('settingsBtn').onclick = openSettings;
+
+// We store the original function to avoid recursion
+const originalSaveSettings = window.saveSettings || (() => {});
+
+window.saveSettings = async function() {
+  // Save to localStorage
+  localStorage.setItem('ra_base', document.getElementById('apiBase').value);
+  localStorage.setItem('ra_key', document.getElementById('apiKey').value);
+  
+  const dot = document.getElementById('connDot');
+  const msg = document.getElementById('connMsg');
+  dot.style.background = 'var(--amber)';
+  msg.textContent = 'Checking…';
+  
+  try {
+    // Test by trying to list projects (protected)
+    await api('GET', '/projects');
+    dot.style.background = 'var(--green)';
+    msg.textContent = 'Connected';
+    toast('Connected successfully', 'ok');
+    await loadProjects();
+    setTimeout(() => closeModal('settingsModal'), 600);
+  } catch(e) {
+    dot.style.background = 'var(--red)';
+    msg.textContent = 'Connection failed — check URL and key';
+    toast('Connection error: ' + e.message, 'err');
+  }
+};
+
+// Set up the connect button
+document.getElementById('connectBtn').onclick = window.saveSettings;
+
+// Load saved settings on page load
+window.addEventListener('load', ()=>{
+  const savedBase = localStorage.getItem('ra_base');
+  const savedKey = localStorage.getItem('ra_key');
+  if(savedBase) document.getElementById('apiBase').value = savedBase;
+  if(savedKey) document.getElementById('apiKey').value = savedKey;
+  // Auto-connect if key exists
+  if(savedKey) window.saveSettings();
+});
+
+// ═══════════════════════════════════════════
+// PROJECTS
+// ═══════════════════════════════════════════
+async function loadProjects(){
+  try{
+    projects = await api('GET','/projects');
+    renderProjects();
+  }catch(e){
+    toast('Could not load projects','err');
+  }
+}
+
+function renderProjects(){
+  const el=document.getElementById('projectList');
+  if(!projects.length){
+    el.innerHTML='<div style="padding:10px 12px;font-size:12px;color:var(--muted);">No projects yet</div>';
+    return;
+  }
+  el.innerHTML=projects.map(p=>`
+    <div class="project-item ${selectedProject?.id===p.id?'active':''}" onclick="selectProject(${p.id})">
+      <div class="project-icon">${p.name[0].toUpperCase()}</div>
+      <span class="project-name">${escHtml(p.name)}</span>
+    </div>
+  `).join('');
+}
+
+function selectProject(id){
+  selectedProject=projects.find(p=>p.id===id);
+  if(!selectedProject) return;
+  document.getElementById('emptyState').style.display='none';
+  document.getElementById('projectView').style.display='flex';
+  document.getElementById('viewTitle').textContent=selectedProject.name;
+  selectedRun=null; clearPoll();
+  renderProjects();
+  loadRuns();
+}
+
+async function createProject(){
+  const name=document.getElementById('newProjectName').value.trim();
+  if(!name) return;
+  try{
+    const p=await api('POST','/projects',{name});
+    projects.unshift(p);
+    closeModal('modalNewProject');
+    document.getElementById('newProjectName').value='';
+    renderProjects(); selectProject(p.id);
+    toast('Project created','ok');
+  }catch(e){ toast('Error: '+e.message,'err'); }
+}
+
+// ═══════════════════════════════════════════
+// RUNS
+// ═══════════════════════════════════════════
+async function loadRuns(){
+  if(!selectedProject) return;
+  try{
+    runs=await api('GET',`/projects/${selectedProject.id}/runs`);
+    renderRuns();
+    const active=runs.find(r=>r.status==='running'||r.status==='pending');
+    if(active){ selectedRun=active; selectRun(active.run_id,true); }
+    else if(runs.length && !selectedRun){ selectRun(runs[0].run_id,true); }
+  }catch{}
+}
+
+function renderRuns(){
+  const wrap=document.getElementById('runsWrap');
+  const list=document.getElementById('runList');
+  const count=document.getElementById('runCount');
+  if(!runs.length){ wrap.style.display='none'; return; }
+  wrap.style.display='block';
+  count.textContent=runs.length+' run'+(runs.length!==1?'s':'');
+  list.innerHTML=runs.map(r=>`
+    <div class="run-card ${selectedRun?.run_id===r.run_id?'selected':''}" onclick="selectRun('${r.run_id}')">
+      <div class="run-dot s-${r.status}"></div>
+      <span class="run-task" title="${escHtml(r.task)}">${escHtml(r.task)}</span>
+      <div class="run-meta">
+        <span class="run-time">${timeAgo(r.created_at)}</span>
+        <span class="badge b-${r.status}">${r.status.replace('_',' ')}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function selectRun(runId, skipScroll=false){
+  clearPoll();
+  try{
+    const run=await api('GET',`/runs/${runId}`);
+    selectedRun=run; renderRuns(); renderRunView(run);
+    if(run.status==='running'||run.status==='pending') pollRun(runId);
+  }catch(e){ toast('Could not load run','err'); }
+}
+
+function renderRunView(run){
+  // pipeline
+  const showPipeline=run.status!=='failed'&&run.status!=='cancelled'&&run.status!=='interrupted';
+  document.getElementById('pipelineWrap').style.display=showPipeline?'block':'none';
+  if(showPipeline) renderPipeline(run);
+
+  // banner
+  const isActive=run.status==='running'||run.status==='pending';
+  document.getElementById('runBanner').style.display=isActive?'flex':'none';
+  if(isActive){
+    const agent=run.current_agent;
+    document.getElementById('bannerMsg').innerHTML=
+      agent&&agent!=='initializing'
+        ? `Agent active — <span class="banner-agent">${agent}</span>`
+        : 'Initialising pipeline…';
+    document.getElementById('cancelBtn').onclick=()=>cancelRun(run.run_id);
+    startElapsed(run.started_at);
+  }else{
+    stopElapsed();
+  }
+
+  // alerts
+  const alert=document.getElementById('alertArea');
+  alert.innerHTML='';
+  if(run.status==='needs_review'){
+    alert.innerHTML=`<div class="alert-box alert-warn">⚑ Force-accepted at revision limit — output exists but was not formally approved. Review before use.</div>`;
+  }
+  if(run.status==='failed'){
+    alert.innerHTML=`<div class="alert-box alert-err">⚠ ${escHtml(run.error||'Unknown error')}</div>`;
+  }
+
+  // report
+  const rw=document.getElementById('reportWrap');
+  if(run.final_output){
+    rw.style.display='block';
+    document.getElementById('reportBody').innerHTML=marked.parse(run.final_output);
+    document.getElementById('reportBadge').innerHTML=badgeHtml(run.status);
+    document.getElementById('reportCancelBtn').style.display=isActive?'inline-flex':'none';
+  }else{
+    rw.style.display='none';
+  }
+}
+
+function renderPipeline(run){
+  const track=document.getElementById('pipelineTrack');
+  const ind=document.getElementById('statusInd');
+  const msg=document.getElementById('statusMsg');
+
+  const showCritic=run.task_mode==='paper'||(run.task&&/paper|academic|publish|write up/i.test(run.task));
+  const nodes=NODE_DEFS.filter(n=>n.id!=='critic'||showCritic);
+  const activeIdx=nodes.findIndex(n=>n.id===run.current_agent);
+
+  track.innerHTML=nodes.map((n,i)=>{
+    let cls='';
+    if(run.status==='running'||run.status==='pending'){
+      if(i<activeIdx) cls='done';
+      else if(i===activeIdx) cls='active';
+    }else if(run.status==='completed'||run.status==='needs_review'){
+      cls='done';
+    }
+    return `
+      <div class="p-node ${cls}">
+        <div class="p-node-ring">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">${n.icon}</svg>
+        </div>
+        <span class="p-node-name">${n.label}</span>
+      </div>`;
+  }).join('');
+
+  if(run.status==='running'){
+    ind.className='status-dot running';
+    msg.innerHTML=run.current_agent&&run.current_agent!=='initializing'
+      ? `Running <span>${run.current_agent}</span>`
+      : 'Initialising…';
+  }else if(run.status==='pending'){
+    ind.className='status-dot running';
+    msg.innerHTML='Queued — starting soon';
+  }else if(run.status==='completed'){
+    ind.className='status-dot done';
+    msg.innerHTML='Completed';
+  }else if(run.status==='needs_review'){
+    ind.className='status-dot warn';
+    msg.innerHTML='Needs review — accepted at revision limit';
+  }
+}
+
+// ═══════════════════════════════════════════
+// START / CANCEL
+// ═══════════════════════════════════════════
+async function startRun(){
+  const task=document.getElementById('taskInput').value.trim();
+  if(!task){ toast('Enter a task first','err'); return; }
+  if(!selectedProject) return;
+  document.getElementById('startRunBtn').disabled=true;
+  try{
+    const run=await api('POST',`/projects/${selectedProject.id}/run`,{task,task_mode:taskMode});
+    toast('Run started','ok');
+    document.getElementById('taskInput').value='';
+    await loadRuns();
+    selectRun(run.run_id);
+  }catch(e){ toast('Error: '+e.message,'err'); }
+  finally{document.getElementById('startRunBtn').disabled=false;}
+}
+
+async function cancelRun(runId){
+  try{
+    await api('POST',`/runs/${runId}/cancel`);
+    toast('Run cancelled','');
+    clearPoll(); stopElapsed();
+    selectRun(runId); loadRuns();
+  }catch(e){ toast('Could not cancel: '+e.message,'err'); }
+}
+function cancelCurrentRun(){ if(selectedRun) cancelRun(selectedRun.run_id); }
+
+// ═══════════════════════════════════════════
+// POLLING
+// ═══════════════════════════════════════════
+function pollRun(runId){
+  clearPoll();
+  pollTimer=setInterval(async()=>{
+    try{
+      const run=await api('GET',`/runs/${runId}`);
+      selectedRun=run;
+      renderRunView(run);
+      const idx=runs.findIndex(r=>r.run_id===runId);
+      if(idx!==-1){ runs[idx]={...runs[idx],status:run.status,current_agent:run.current_agent}; renderRuns(); }
+      if(run.status!=='running'&&run.status!=='pending'){ clearPoll(); stopElapsed(); loadRuns(); }
+    }catch{}
+  },3000);
+}
+function clearPoll(){ if(pollTimer){ clearInterval(pollTimer); pollTimer=null; } }
+
+function startElapsed(startedAt){
+  stopElapsed();
+  const el=document.getElementById('pipelineElapsed');
+  const t0=startedAt?new Date(startedAt):new Date();
+  function tick(){
+    const s=Math.floor((Date.now()-t0)/1000);
+    const m=Math.floor(s/60),sec=s%60;
+    el.textContent=m>0?`${m}m ${sec}s`:`${sec}s`;
+  }
+  tick(); elapsedTimer=setInterval(tick,1000);
+}
+function stopElapsed(){
+  if(elapsedTimer){ clearInterval(elapsedTimer); elapsedTimer=null; }
+  document.getElementById('pipelineElapsed').textContent='';
+}
+
+// ═══════════════════════════════════════════
+// INGEST
+// ═══════════════════════════════════════════
+async function ingestFile(e){
+  const file=e.target.files[0]; if(!file||!selectedProject) return;
+  const st=document.getElementById('ingestStatus');
+  st.textContent='Ingesting…';
+  try{
+    const form=new FormData(); form.append('file',file);
+    const res=await api('POST',`/projects/${selectedProject.id}/ingest`,form,true);
+    st.textContent=`✓ ${res.chunks_stored} chunks`;
+    toast(`Ingested ${file.name}  ·  ${res.chunks_stored} chunks`,'ok');
+  }catch(err){ st.textContent=''; toast('Ingest failed: '+err.message,'err'); }
+  e.target.value='';
+}
+
+async function submitUrl(){
+  const url=document.getElementById('ingestUrlVal').value.trim();
+  if(!url||!selectedProject) return;
+  closeModal('modalIngestUrl');
+  const st=document.getElementById('ingestStatus');
+  st.textContent='Ingesting URL…';
+  try{
+    const form=new FormData(); form.append('url',url);
+    const res=await api('POST',`/projects/${selectedProject.id}/ingest`,form,true);
+    st.textContent=`✓ ${res.chunks_stored} chunks`;
+    toast(`Ingested URL  ·  ${res.chunks_stored} chunks`,'ok');
+  }catch(err){ st.textContent=''; toast('Ingest failed: '+err.message,'err'); }
+  document.getElementById('ingestUrlVal').value='';
+}
+
+// ═══════════════════════════════════════════
+// MEMORY
+// ═══════════════════════════════════════════
+async function showMemory(){
+  if(!selectedProject) return;
+  try{
+    const mem=await api('GET',`/projects/${selectedProject.id}/memory`);
+    document.getElementById('memContent').innerHTML=`
+      <div class="mem-grid">
+        <div class="mem-card"><div class="mem-num">${mem.research_summaries}</div><div class="mem-label">Research summaries</div></div>
+        <div class="mem-card"><div class="mem-num">${mem.analysis_summaries}</div><div class="mem-label">Analysis summaries</div></div>
+        <div class="mem-card"><div class="mem-num">${mem.prior_reports}</div><div class="mem-label">Prior reports</div></div>
+        <div class="mem-card"><div class="mem-num">${mem.critic_reports??0}</div><div class="mem-label">Critic reports</div></div>
+      </div>`;
+    openModal('modalMemory');
+  }catch(e){ toast('Could not load memory','err'); }
+}
+document.getElementById('memoryChip').onclick=showMemory;
+
+// ═══════════════════════════════════════════
+// UTILS
+// ═══════════════════════════════════════════
+function setMode(m){
+  taskMode=m;
+  document.getElementById('modeSummary').classList.toggle('active',m==='summary');
+  document.getElementById('modePaper').classList.toggle('active',m==='paper');
+  document.getElementById('modeHint').textContent=
+    m==='summary'?'Summary mode · concise report':'Paper mode · academic output + novelty check';
+}
+
+function badgeHtml(s){return`<span class="badge b-${s}">${s.replace('_',' ')}</span>`}
+function copyReport(){
+  if(selectedRun?.final_output){ navigator.clipboard.writeText(selectedRun.final_output); toast('Copied','ok'); }
+}
+function timeAgo(ts){
+  if(!ts)return''; const d=(Date.now()-new Date(ts))/1000;
+  if(d<60)return Math.floor(d)+'s ago';
+  if(d<3600)return Math.floor(d/60)+'m ago';
+  if(d<86400)return Math.floor(d/3600)+'h ago';
+  return Math.floor(d/86400)+'d ago';
+}
+function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function toast(msg,type=''){
+  const shelf=document.getElementById('toastShelf');
+  const el=document.createElement('div');
+  el.className='toast '+(type==='ok'?'ok':type==='err'?'err':'');
+  el.textContent=msg; shelf.appendChild(el);
+  setTimeout(()=>el.remove(),3200);
+}
+function openModal(id){ document.getElementById(id).classList.remove('hidden'); }
+function closeModal(id){ document.getElementById(id).classList.add('hidden'); }
+
+// ═══════════════════════════════════════════
+// EVENTS
+// ═══════════════════════════════════════════
+document.getElementById('newProjectBtn').onclick=()=>openModal('modalNewProject');
+document.getElementById('startRunBtn').onclick=startRun;
+document.getElementById('ingestUrlBtn').onclick=()=>openModal('modalIngestUrl');
+
+document.getElementById('newProjectName').addEventListener('keydown',e=>{ if(e.key==='Enter') createProject(); });
+document.getElementById('ingestUrlVal').addEventListener('keydown',e=>{ if(e.key==='Enter') submitUrl(); });
+document.getElementById('taskInput').addEventListener('keydown',e=>{ if((e.ctrlKey||e.metaKey)&&e.key==='Enter') startRun(); });
+
+['settingsModal','modalNewProject','modalIngestUrl','modalMemory'].forEach(id=>{
+  document.getElementById(id).addEventListener('click',e=>{ if(e.target===e.currentTarget) closeModal(id); });
+});
+
+// Auto-connect if settings saved
+window.addEventListener('load', ()=>{
+  // already done above
+});
+
+// Fix for reportCancelBtn
+document.getElementById('reportCancelBtn').onclick = cancelCurrentRun;
+</script>
+</body>
+</html>

@@ -3,7 +3,12 @@ FROM python:3.12-slim
 WORKDIR /workspace
 
 COPY requirements.txt .
+
 RUN pip install --no-cache-dir -q -r requirements.txt
-RUN useradd -m sandboxuser
-USER sandboxuser
-CMD [ "python" ]
+
+RUN groupadd --gid 1000 sandboxuser \
+    && useradd --uid 1000 --gid 1000 --create-home sandboxuser
+
+USER 1000:1000
+
+CMD ["python"]
