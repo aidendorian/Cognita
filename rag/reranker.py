@@ -1,4 +1,3 @@
-import os
 from sentence_transformers import CrossEncoder
 from config.env import enable_reranker, reranker_top_k
 class Reranker:
@@ -12,7 +11,7 @@ class Reranker:
         if not self.enabled or not documents:
             return documents
 
-        pairs = [[query, doc] for doc in documents]
+        pairs = [[query, doc["chunk_text"]] for doc in documents]
         scores = self.model.predict(pairs)
         
         sorted_docs = sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)
