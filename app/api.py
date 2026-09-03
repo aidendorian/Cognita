@@ -9,36 +9,34 @@ from pydantic import BaseModel
 from psycopg_pool import ConnectionPool
 from memory.conversation import create_chat, save_messages
 from memory.project import save_project_memory
-from config.env import db_url
 from app.dependencies import validate_api_key, limiter
 from graphs.checkpointer import get_checkpointer
 from memory.knowledge_graph import shutdown_graphiti
 from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
+from memory.knowledge_graph import setup_graphiti, shutdown_graphiti
+from app.dependencies import get_pool
+
+_active_threads: dict[str, threading.Thread] = {}
+_active_threads_lock = threading.Lock()
 
 MAX_FILE_SIZE = 50 * 1024 * 1024
 ALLOWED_MIME_TYPES = {"application/pdf"}
 
 _pool: Optional[ConnectionPool] = None
 
-def get_pool() -> ConnectionPool:
-    global _pool
-
-    if _pool is None:
-        _pool = ConnectionPool(
-            db_url,
-            min_size=1,
-            max_size=10,
-            open=True,
-        )
-
-    return _pool
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     get_checkpointer()
     get_pool()
-
+    setup_graphiti()
+    with get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE runs SET status = 'interrupted', error = 'Server restarted'
+                WHERE status IN ('running', 'pending')
+            """)
+        conn.commit()
     try:
         yield
     finally:
@@ -47,7 +45,6 @@ async def lifespan(app: FastAPI):
         if _pool is not None:
             _pool.close()
             _pool = None
-
 
 app = FastAPI(
     title="ResearchPlatform API",
@@ -228,7 +225,7 @@ def _run_workflow_background(project_id: int, run_id: str, thread_id: str, task:
         result = graph_app.invoke(
             initial_state,  # type: ignore[arg-type]
             config={
-                "recursion_limit": 20,
+                "recursion_limit": 50,
                 "configurable": {"thread_id": thread_id},
             },
         )
@@ -242,23 +239,29 @@ def _run_workflow_background(project_id: int, run_id: str, thread_id: str, task:
 
         final_output = result.get("final_output")
 
-        _update_run(
-            run_id,
-            status="completed",
-            current_agent="completed",
-            final_output=final_output,
-        )
+        run = _get_run_by_id(run_id)
+        if run and run["status"] != "cancelled":
+            _update_run(
+                run_id,
+                status="completed",
+                current_agent="completed",
+                final_output=final_output,
+            )
 
     except Exception as exc:
         try:
-            _update_run(
-                run_id,
-                status="failed",
-                current_agent="failed",
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            run = _get_run_by_id(run_id)
+            if run and run["status"] != "cancelled":
+                _update_run(
+                    run_id,
+                    status="failed",
+                    current_agent="failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
         except Exception:
             pass
+    with _active_threads_lock:
+        _active_threads.pop(run_id, None)
 
 @app.get("/")
 @limiter.limit("60/minute")
@@ -315,6 +318,39 @@ async def list_projects(request: Request, api_key: str = Depends(validate_api_ke
         for row in rows
     ]
 
+@app.get("/projects/{project_id}/runs")
+@limiter.limit("30/minute")
+async def list_runs(request: Request, project_id: int, api_key: str = Depends(validate_api_key)):
+    if not _project_exists(project_id):
+        raise HTTPException(404, "Project not found")
+
+    with get_pool().connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, task, status, current_agent, error, created_at, started_at, completed_at
+                FROM runs
+                WHERE project_id = %s
+                ORDER BY created_at DESC
+                """,
+                (project_id,),
+            )
+            rows = cur.fetchall()
+
+    return [
+        {
+            "run_id": str(row[0]),
+            "task": row[1],
+            "status": row[2],
+            "current_agent": row[3],
+            "error": row[4],
+            "created_at": str(row[5]),
+            "started_at": str(row[6]) if row[6] else None,
+            "completed_at": str(row[7]) if row[7] else None,
+        }
+        for row in rows
+    ]
+
 @app.post("/projects/{project_id}/run", status_code=202)
 @limiter.limit("2/minute")
 async def run_workflow(request: Request, project_id: int, body: RunRequest, api_key: str = Depends(validate_api_key)):
@@ -333,13 +369,34 @@ async def run_workflow(request: Request, project_id: int, body: RunRequest, api_
         name=f"research-run-{run_id[:8]}",
         daemon=True,
     )
+    
+    with _active_threads_lock:
+            _active_threads[run_id] = thread
+    
     thread.start()
-
+    
     return {
         "run_id": run_id,
         "project_id": project_id,
         "status": "pending",
     }
+    
+@app.post("/runs/{run_id}/cancel", status_code=200)
+@limiter.limit("10/minute")
+async def cancel_run(request: Request, run_id: str, api_key: str = Depends(validate_api_key)):
+    run = _get_run_by_id(run_id)
+    if not run:
+        raise HTTPException(404, "Run not found")
+
+    if run["status"] not in {"pending", "running"}:
+        raise HTTPException(400, f"Run is already {run['status']} — cannot cancel")
+
+    _update_run(run_id, status="cancelled", error="Cancelled by user")
+
+    with _active_threads_lock:
+        _active_threads.pop(run_id, None)
+
+    return {"run_id": run_id, "status": "cancelled"}
 
 @app.get("/runs/{run_id}")
 @limiter.limit("30/minute")
