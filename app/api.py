@@ -16,6 +16,9 @@ from slowapi.errors import RateLimitExceeded
 from slowapi import _rate_limit_exceeded_handler
 from memory.knowledge_graph import setup_graphiti, shutdown_graphiti
 from app.dependencies import get_pool
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 _active_threads: dict[str, threading.Thread] = {}
 _active_threads_lock = threading.Lock()
@@ -55,6 +58,19 @@ app = FastAPI(
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler) #type: ignore
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.mount("/app", StaticFiles(directory="app"), name="app")
+
+@app.get("/ui")
+async def ui():
+    return FileResponse("app/index.html")
 
 class ProjectCreate(BaseModel):
     name: str
@@ -238,12 +254,14 @@ def _run_workflow_background(project_id: int, run_id: str, thread_id: str, task:
         save_project_memory(project_id, result)  # type: ignore[arg-type]
 
         final_output = result.get("final_output")
+        graph_status = result.get("status")
 
         run = _get_run_by_id(run_id)
         if run and run["status"] != "cancelled":
+            terminal_status = "needs_review" if graph_status == "needs_review" else "completed"
             _update_run(
                 run_id,
-                status="completed",
+                status=terminal_status,
                 current_agent="completed",
                 final_output=final_output,
             )
@@ -293,7 +311,6 @@ async def create_project(request: Request, body: ProjectCreate, api_key: str = D
         "name": row[1], #type: ignore
         "created_at": str(row[2]), #type: ignore
     }
-
 
 @app.get("/projects")
 @limiter.limit("30/minute")
