@@ -133,13 +133,17 @@ def search_knowledge_graph(query: str, project_id: int, num_results: int = 5) ->
         return []
 
 def shutdown_graphiti() -> None:
-    global _loop, _graphiti
-    if _loop is not None and not _loop.is_closed():
-        _loop.call_soon_threadsafe(_loop.stop)
-        time.sleep(0.5)
+    global _loop, _loop_thread, _graphiti
     if _graphiti is not None:
         try:
             _run_async(_graphiti.close())
         except Exception:
             pass
+        _graphiti = None
+    if _loop is not None and not _loop.is_closed():
+        _loop.call_soon_threadsafe(_loop.stop)
+        
+    if _loop_thread is not None and _loop_thread.is_alive():
+        _loop_thread.join(timeout=5)
+
     print("[graphiti] shut down gracefully")
