@@ -14,6 +14,8 @@ from pathlib import Path
 import re
 import logging
 from rag.ingest import ingest_url_content
+from app.runs import update_run_agent
+from graphs.state import _merge_evidence, _format_evidence, _render_references, Evidence
 
 logger = logging.getLogger("ResearchAgent")
 
@@ -89,9 +91,9 @@ def _get_output_files(project_id: int, run_id: str | None = None) -> list[str]:
         return []
     return sorted(str(path.relative_to(root)) for path in output_dir.rglob("*") if path.is_file())
 
-
 @observe(name="entry", capture_input=False, capture_output=False)
 def entry(state: State) -> dict:
+    update_run_agent(str(state["run_id"]), "entry")
     existing = state.get("messages") or []
     new_messages = []
     if not any(m.get("content") == state["task"] for m in existing if isinstance(m, dict)):
@@ -119,6 +121,7 @@ def _derive_task_mode(state: State) -> str:
 
 @observe(name="planner", capture_input=False, capture_output=False)
 def planner(state: State) -> dict:
+    update_run_agent(str(state["run_id"]), "planner")
     if state.get("final_output"):
         return {"next_agent": "end", "status": "complete", "task_mode": state.get("task_mode")}
 
@@ -214,6 +217,7 @@ def planner(state: State) -> dict:
 
 @observe(name="researcher", capture_input=False, capture_output=False)
 def researcher(state: State) -> dict:
+    update_run_agent(str(state["run_id"]), "researcher")
     prior = load_project_memory(state["project_id"])    
     prior_context = format_prior_memory(prior, limit_per_item=300)
     
@@ -232,7 +236,7 @@ def researcher(state: State) -> dict:
             max_results=3
         )
     except Exception as e:
-        logger.warning("[researcher] web search failed: %s", e)
+        logger.warning("[researcher] web search failed: %s", e)    
         
     for r in search_results:
         url = r.get("url", "")
@@ -242,7 +246,10 @@ def researcher(state: State) -> dict:
                 ingest_url_content(content, url=url, project_id=state["project_id"])
             except Exception:
                 pass
-        
+            
+    evidence = _merge_evidence(state.get("evidence", []),chunks, search_results)
+    evidence_context = _format_evidence(evidence)
+    
     context = "\n\n".join(f"[Source: {c['source']}]\n{c['chunk_text'][:600]}" for c in chunks) if chunks else "No relevant documents found in knowledge base."
 
     web_context = "\n\n".join(f"<retrieved_document source='{r.get('url', '')}'>\n{r.get('content', '')[:400]}\n</retrieved_document>" for r in search_results) if search_results else "No web results."
@@ -277,11 +284,21 @@ def researcher(state: State) -> dict:
     KNOWLEDGE GRAPH FACTS FROM PRIOR SESSIONS:
     {graph_context}
     
+    AVAILABLE EVIDENCE:
+    {evidence_context}
+    
     Using the retrieved context above as your primary source, produce a comprehensive 
     research report covering:
     1. Key concepts and definitions
     2. Current state of knowledge — important findings, methods, models
-    3. Relevant papers, authors, or sources (cite from the retrieved context)
+    3. Relevant papers, authors, or sources, with citations
+        CITATION RULES:
+        - The available evidence is identified as [E1], [E2], [E3], etc.
+        - When making a factual claim based on retrieved evidence, cite the relevant evidence ID.
+        - Use only evidence IDs provided below.
+        - Never invent an evidence ID.
+        - Do not cite evidence that does not support the claim.
+        - General knowledge that is not supported by the retrieved evidence should not be presented as though it
     4. Open questions and known gaps
     5. Technical details relevant to the overall goal
 
@@ -313,12 +330,19 @@ def researcher(state: State) -> dict:
     return {
         "research_output": response,
         "research_summary": summary,
+        "evidence": evidence,
         "status": "running",
-        "messages": [{"role": "assistant", "content": f"[researcher] {summary}"}],
+        "messages": [
+            {
+                "role": "assistant",
+                "content": f"[researcher] {summary}"
+            }
+        ],
     }
 
 @observe(name="coder", capture_input=False, capture_output=False)
 def coder(state: State) -> dict:
+    update_run_agent(str(state["run_id"]), "coder")
     prompt = f"""
     You are an expert Python coding agent. You write clean, correct, well-commented Python code.
 
@@ -404,12 +428,10 @@ def coder(state: State) -> dict:
 
 @observe(name="analyst", capture_input=False, capture_output=False)
 def analyst(state: State) -> dict:
+    update_run_agent(str(state["run_id"]), "analyst")
     prior = load_project_memory(state["project_id"])
     prior_context = format_prior_memory(prior)
     fs = FileSystem(project_id=state["project_id"], run_id=state.get("run_id"))
-    
-    # Generated artifacts stay run-scoped and are not added to project-wide RAG.
-    # This prevents later runs from retrieving another run's outputs as sources.
 
     csv_content = ""
     for f in fs.list_files("outputs"):
@@ -472,7 +494,12 @@ def analyst(state: State) -> dict:
     }
 @observe(name="writer", capture_input=False, capture_output=False)
 def writer(state: State) -> dict:
+    update_run_agent(str(state["run_id"]), "writer")
     revision_count = (state.get("revision_count") or 0) + 1
+    
+    evidence = state.get("evidence", [])
+    evidence_context = _format_evidence([e for e in evidence if e["status"] == "supported"])
+    
     current_step = state.get("current_step") or "Write the research report"
     prompt = f"""
     You are an expert research writing agent. You produce clear, well-structured,
@@ -490,6 +517,15 @@ def writer(state: State) -> dict:
     - Previous draft : {state.get("draft") or "None yet."}
     - Reviewer feedback : {state.get("review_notes") or "None yet — first draft."}
     - Novelty report : {state.get("novelty_report") or "None — no novelty check done."}
+    - Evidence : {evidence_context}
+    
+    CITATION RULES:
+    - Cite substantive factual claims using [E#].
+    - Only cite evidence provided in the evidence context.
+    - Only use evidence marked supported.
+    - Never invent evidence IDs.
+    - A citation must directly support the claim it follows.
+    - Do not generate a References section.
 
     INSTRUCTIONS:
     - If reviewer feedback exists, this is a REVISION — read every numbered point carefully
@@ -528,6 +564,11 @@ def writer(state: State) -> dict:
 
 @observe(name="reviewer", capture_input=False, capture_output=False)
 def reviewer(state: State) -> dict:
+    update_run_agent(str(state["run_id"]), "reviewer")
+    
+    evidence = state.get("evidence", [])
+    evidence_context = _format_evidence(evidence)
+    
     revision_count = state.get("revision_count") or 0
     if revision_count >= MAX_REVISIONS:
         note = (
@@ -558,6 +599,17 @@ def reviewer(state: State) -> dict:
     - Output files : {", ".join(state.get("output_files") or []) or "None."}
     - Prior notes : {mask(state.get("review_notes"), limit=400) or "None — first review."}
     
+    EVIDENCE AVAILABLE FOR VERIFICATION:
+    {evidence_context}
+
+    CITATION VALIDATION:
+    - Every [E#] citation must refer to an existing evidence ID.
+    - The evidence must have status "supported".
+    - The cited evidence must actually support the claim.
+    - Flag citations to rejected or unverified evidence.
+    - Flag factual claims that require evidence but have no citation.
+    - Never accept a fabricated evidence ID.
+    
     CONTEXT:
     - This is a research summary report, not a peer-reviewed journal submission
     - Approve if the document is substantially correct, complete, and addresses the task
@@ -571,10 +623,12 @@ def reviewer(state: State) -> dict:
     CHECK FOR:
     1. Unsupported claims — facts not grounded in the research or analysis
     2. Missing citations — key findings that need sourcing
-    3. Logical inconsistencies — conclusions that don't follow from evidence
-    4. Contradictions with code results — claims that conflict with actual outputs
-    5. Completeness — does the draft fully address the original task?
-    6. Clarity — confusing sentences, undefined jargon
+    3. Citation evidence mismatch - citations that don't match with claims
+    4. Fabricated evidence IDs or URLs - URLs or Evidences that don't exist
+    5. Logical inconsistencies — conclusions that don't follow from evidence
+    6. Contradictions with code results — claims that conflict with actual outputs
+    7. Completeness — does the draft fully address the original task?
+    8. Clarity — confusing sentences, undefined jargon
 
     FORMAT — return ONLY a valid JSON object, no other text:
     {{
@@ -629,7 +683,8 @@ def reviewer(state: State) -> dict:
     
     if approved:
         fs = FileSystem(project_id=state["project_id"], run_id=state.get("run_id"))
-        fs.write("outputs/final_report.md", state.get("draft") or "") #type: ignore
+        final_report = str(state.get("draft")) + "\n\n" + _render_references(state.get("evidence", []))
+        fs.write("outputs/final_report.md", final_report or "") #type: ignore
         
     get_langfuse_client().update_current_span(
         metadata={
@@ -649,10 +704,11 @@ def reviewer(state: State) -> dict:
     
 @observe(name="critic", capture_input=False, capture_output=False)
 def critic(state: State) -> dict:
+    update_run_agent(str(state["run_id"]), "critic")
     prior = load_project_memory(state["project_id"])
     prior_context = format_prior_memory(prior)
     
-    papers = None
+    papers = []
     api_error = False
 
     try:
@@ -660,6 +716,47 @@ def critic(state: State) -> dict:
     except Exception as e:
         logger.warning("[critic] Semantic Scholar API failed: %s", e)
         api_error = True
+        
+    evidence = state.get("evidence", [])
+    paper_evidence_ids = []
+    for paper in papers:
+        item = {
+            "source": paper["title"],
+            "url": paper.get("url"),
+            "excerpt": paper.get("abstract", "")[:800],
+        }
+
+        key = (
+            item["source"],
+            item["url"],
+            item["excerpt"],
+        )
+
+        existing_keys = {
+            (e["source"], e.get("url"), e["excerpt"])
+            for e in evidence
+        }
+
+        if key not in existing_keys:
+            data = {
+                **item,
+                "id": f"E{len(evidence) + 1}",
+                "status": "unverified",
+                "reason": None,
+            }
+            evidence.append(Evidence(**data))
+
+        matching = next(
+            e for e in evidence
+            if (
+                e["source"],
+                e.get("url"),
+                e["excerpt"],
+            ) == key
+        )
+        paper_evidence_ids.append(matching["id"])
+            
+    evidence_context = _format_evidence(evidence)
 
     if api_error:
         report = (
@@ -687,14 +784,16 @@ def critic(state: State) -> dict:
         }
     
     papers_text = "\n\n".join(
+        f"[{evidence_id}]\n"
         f"Title: {p['title']}\n"
         f"Year: {p['year']}\n"
         f"Citations: {p['citation_count']}\n"
         f"Authors: {p['authors']}\n"
         f"URL: {p['url']}\n"
         f"Abstract: {p['abstract'][:300]}"
-        for p in papers
+        for p, evidence_id in zip(papers, paper_evidence_ids)
     )
+    
     prompt = f"""
     You are a research critic agent. Your job is to assess novelty and identify
     how a new research report should differentiate itself from existing work.
@@ -703,6 +802,9 @@ def critic(state: State) -> dict:
 
     SIMILAR EXISTING PAPERS:
     {papers_text}
+    
+    When making claims about existing papers in the novelty report, cite the corresponding evidence ID [E#].
+    Never invent an evidence ID.
     
     Prior Criticism: {prior_context}
 
@@ -713,8 +815,72 @@ def critic(state: State) -> dict:
     4. Specific differentiation instructions for the writer
 
     Be specific and actionable. The writer will read this report before drafting.
+    
+    RESEARCH REPORT TO VERIFY:
+    {mask(state.get("research_output"), 4000)}
+
+    EVIDENCE:
+    {evidence_context}
+
+    EVIDENCE VERIFICATION:
+
+    For each evidence item, determine whether it adequately supports the factual claim(s) made from it in the RESEARCH REPORT.
+    Do not determine whether the underlying source is objectively true.
+    Determine only whether the provided excerpt is sufficient and relevant to support the claim attributed to it.
+    Return one review for each evidence item.
+
+    Return an evidence_reviews array.
+
+    For each evidence item, determine whether it adequately supports claims made in the research report.
+
+    Mark:
+    - "supported" when the evidence directly supports the relevant claim(s) in the research report.
+    - "rejected" when the evidence does not support the claim, is contradictory, or is insufficient.
+
+    Do not judge whether the source is universally truthful.
+    Judge whether the source excerpt supports the claim being
+    made from it.
+
+    Example:
+    
+    {
+        "novelty_report": "...",
+        "evidence_reviews": [
+            {
+                "id": "E1",
+                "status": "supported",
+                "reason": "..."
+                },
+                {
+                "id": "E2",
+                "status": "rejected",
+                "reason": "..."
+            }
+        ]
+    }
+    
     """
-    response = get_llm().generate(prompt, max_output_tokens=2048)
+    response = get_llm().generate(prompt, max_output_tokens=4096)
+    
+    critic_result = _extract_json(response)
+    novelty_report = critic_result.get("novelty_report", "")
+    evidence_reviews = critic_result.get("evidence_reviews", [])
+    
+    evidence = state.get("evidence", [])
+
+    evidence_by_id = {e["id"]: e for e in evidence}
+
+    for review in evidence_reviews:
+        evidence_item = evidence_by_id.get(review.get("id"))
+
+        if evidence_item is None:
+            continue
+
+        if review.get("status") not in {"supported", "rejected"}:
+            continue
+
+        evidence_item["status"] = review["status"]
+        evidence_item["reason"] = review.get("reason")
     
     get_langfuse_client().update_current_span(
         metadata={
@@ -725,7 +891,8 @@ def critic(state: State) -> dict:
     )
     
     return {
-        "novelty_report": response,
+        "novelty_report": novelty_report,
         "status": "running",
+        "evidence": list(evidence_by_id.values()),
         "messages": [{"role": "assistant", "content": f"[critic] novelty check complete"}],
     }
