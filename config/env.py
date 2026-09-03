@@ -21,8 +21,8 @@ class ValidateENV(BaseSettings):
     neo4j_password: str = Field(..., validation_alias="NEO4J_PASSWORD", min_length=1)
     db_host: str = Field("localhost", validation_alias="DATABASE_HOST")
     fastapi_api_key: str = Field(..., validation_alias="FASTAPI_API_KEY", min_length=1)
-    reranker_top_k: int = Field(5, validation_alias="RERANKER_TOP_K", min_length=1)
-    enable_reranker: bool = Field(False, validation_alias="ENABLE_RERANKER", min_length=1)
+    reranker_top_k: int = Field(5, validation_alias="RERANKER_TOP_K", ge=1)
+    enable_reranker: bool = Field(False, validation_alias="ENABLE_RERANKER")
     
     def db_url(self) -> str:
         return f"postgresql://{self.db_username}:{self.db_password}@{self.db_host}:5432/{self.db_name}"
