@@ -57,7 +57,5 @@ def get_app():
                 "writer": "writer",
             }
         )
-
-        _checkpointer.setup()
         app = graph.compile(checkpointer=_checkpointer)
     return app

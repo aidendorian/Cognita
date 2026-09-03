@@ -13,8 +13,9 @@ from memory.knowledge_graph import add_research_episode, search_knowledge_graph
 from pathlib import Path
 import re
 import logging
+from rag.ingest import ingest_url_content
 
-logger = logging.Logger("ResearchAgent")
+logger = logging.getLogger("ResearchAgent")
 
 _llm = None
 _client = None
@@ -34,7 +35,7 @@ def get_langfuse_client():
     return _client
 
 VALID_AGENTS = {"researcher", "coder", "analyst", "critic", "end"}
-MAX_REVISIONS = 2
+MAX_REVISIONS = 3
 
 def _multi_retrieve(queries: list[str], project_id: int, top_k: int = 5) -> list[dict]:
     seen = set()
@@ -113,7 +114,7 @@ def _derive_task_mode(state: State) -> str:
     task_mode = state.get("task_mode")
     if task_mode in {"paper", "summary"}:
         return task_mode
-    paper_keywords = ["paper", "write up", "publish", "academic", "research paper", "novel"]
+    paper_keywords = ["paper", "write up", "publish", "academic", "research paper"]
     return "paper" if any(k in state["task"].lower() for k in paper_keywords) else "summary"
 
 @observe(name="planner", capture_input=False, capture_output=False)
@@ -138,7 +139,7 @@ def planner(state: State) -> dict:
     - analyst : interprets findings, identifies patterns, draws conclusions, flags gaps
     - critic : novelty check — searches Semantic Scholar, compares to existing literature
                    Use before writing if task_mode=paper and no novelty_report yet
-    - end : - end : research phase complete — writing will begin automatically
+    - end : research phase complete — writing will begin automatically
 
     CURRENT STATE:
     - Research summary : {"done — " + mask(state.get("research_summary"), 150) if state.get("research_summary") else "not done"}
@@ -226,11 +227,21 @@ def researcher(state: State) -> dict:
     try:
         search_results = web_search(
             query=str(state["current_step"]),
+            run_id=state["run_id"],
             project_id=state["project_id"],
             max_results=3
         )
     except Exception as e:
         logger.warning("[researcher] web search failed: %s", e)
+        
+    for r in search_results:
+        url = r.get("url", "")
+        content = r.get("content", "")
+        if url and content:
+            try:
+                ingest_url_content(content, url=url, project_id=state["project_id"])
+            except Exception:
+                pass
         
     context = "\n\n".join(f"[Source: {c['source']}]\n{c['chunk_text'][:600]}" for c in chunks) if chunks else "No relevant documents found in knowledge base."
 

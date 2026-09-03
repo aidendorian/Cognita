@@ -5,6 +5,7 @@ from langgraph.graph.message import add_messages
 
 class State(TypedDict):
     project_id: int
+    run_id: Optional[str]
     task: str
     status: Optional[str]
 
