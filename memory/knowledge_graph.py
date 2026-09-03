@@ -48,26 +48,26 @@ def _get_graphiti():
         if _graphiti is not None:
             return _graphiti
 
-    llm_config = LLMConfig(
-        api_key=api_key,
-        model=llm_model,
-        temperature=0.0,
-    )
+        llm_config = LLMConfig(
+            api_key=api_key,
+            model=llm_model,
+            temperature=0.0,
+        )
 
-    embedder_config = GeminiEmbedderConfig(
-        api_key=api_key,
-        embedding_model="gemini-embedding-001",
-    )
+        embedder_config = GeminiEmbedderConfig(
+            api_key=api_key,
+            embedding_model="gemini-embedding-001",
+        )
 
-    _graphiti = Graphiti(
-        uri=neo4j_uri,
-        user=neo4j_user,
-        password=neo4j_password,
-        llm_client=GeminiClient(config=llm_config),
-        embedder=GeminiEmbedder(config=embedder_config),
-        cross_encoder=GeminiRerankerClient(config=llm_config)
-    )
-    print("[graphiti] initialized with native Gemini backend")
+        _graphiti = Graphiti(
+            uri=neo4j_uri,
+            user=neo4j_user,
+            password=neo4j_password,
+            llm_client=GeminiClient(config=llm_config),
+            embedder=GeminiEmbedder(config=embedder_config),
+            cross_encoder=GeminiRerankerClient(config=llm_config)
+        )
+        print("[graphiti] initialized with native Gemini backend")
     return _graphiti
 
 def setup_graphiti() -> None:
