@@ -18,6 +18,10 @@ def format_prior_memory(prior: dict, limit_per_item: int = 500) -> str:
         ]
         combined = "\n---\n".join(items)
         sections.append(f"PRIOR ANALYSIS SESSIONS:\n{combined}")
+        
+    if prior.get("critic_reports"):
+        latest = mask(prior["critic_reports"][-1], limit=limit_per_item)
+        sections.append(f"PRIOR NOVELTY ASSESSMENT:\n{latest}")
 
     if prior.get("prior_reports"):
         latest = mask(prior["prior_reports"][-1], limit=limit_per_item)
