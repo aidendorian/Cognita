@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS summaries (
     created_at TIMESTAMP DEFAULT now()
 );
 
-CREATE TABLE runs (
+CREATE TABLE IF NOT EXISTS runs (
     id UUID PRIMARY KEY,
     thread_id TEXT NOT NULL UNIQUE,
 
