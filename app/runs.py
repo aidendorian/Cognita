@@ -16,6 +16,18 @@ VALID_STATUSES = {
     "needs_review",
 }
 
+def update_run_agent(run_id: str, agent_name: str):
+    with psycopg.connect(db_url) as conn:
+        conn.execute(
+            """
+            UPDATE runs
+            SET current_agent = %s
+            WHERE run_id = %s
+            """,
+            (agent_name, run_id),
+        )
+        conn.commit()
+
 def _validate_status(status: str) -> None:
     if status not in VALID_STATUSES:
         raise ValueError(
