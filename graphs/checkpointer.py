@@ -10,7 +10,7 @@ def get_checkpointer():
     global _pool, _checkpointer
     if _checkpointer is None:
         _pool = psycopg_pool.ConnectionPool(
-            conninfo=db_url,
+            conninfo=db_url, #type: ignore
             min_size=1,
             max_size=5,
             kwargs={"autocommit": True, "row_factory": dict_row},
