@@ -963,10 +963,6 @@ def reviewer(state: State) -> dict:
                 "Please improve and resubmit."
             )
 
-    # Deterministic safety net: the reviewer prompt asks the LLM to validate
-    # citation IDs, but nothing in code actually checks them. Cross-check
-    # every [E#] in the draft against evidence directly and override an
-    # APPROVED verdict if the LLM missed a fabricated or unsupported citation.
     citation_issues = _validate_citations(draft, evidence)
     if citation_issues and approved:
         approved = False
