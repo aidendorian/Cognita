@@ -138,7 +138,7 @@ def planner(state: State) -> dict:
 
     AGENTS YOU CAN ROUTE TO:
     - researcher : web search, literature review, gathering facts
-    - coder : writes and runs Python (data analysis, visualisations, statistics)
+    - coder : writes and runs Python (data analysis, visualisations, statistics) [only route to coder when the task can be done using only pandas, numpy, matplotlib, seaborn, scipy, scikit-learn, pytest and takes less than 240 seconds to execute]
     - analyst : interprets findings, identifies patterns, draws conclusions, flags gaps
     - critic : novelty check — searches Semantic Scholar, compares to existing literature
                    Use before writing if task_mode=paper and no novelty_report yet
@@ -182,8 +182,14 @@ def planner(state: State) -> dict:
             "messages": [{"role": "assistant", "content": "[planner] failed to parse plan"}],
         }
 
-    llm_agent = str(data.get("next_agent", "end"))
-    reasoning = data.get("reasoning", "")
+    llm_agent = str(data.get("next_agent") or "end")
+    reasoning = str(data.get("reasoning") or "")
+
+    if llm_agent not in VALID_AGENTS:
+        logger.warning("[planner] invalid agent %r — routing to end", llm_agent)
+        next_agent = "end"
+    else:
+        next_agent = llm_agent
 
     if llm_agent not in VALID_AGENTS:
         logger.warning("[planner] invalid agent %r — routing to end", llm_agent)
@@ -565,40 +571,73 @@ def writer(state: State) -> dict:
 @observe(name="reviewer", capture_input=False, capture_output=False)
 def reviewer(state: State) -> dict:
     update_run_agent(str(state["run_id"]), "reviewer")
-    
-    evidence = state.get("evidence", [])
+
+    raw_evidence = state.get("evidence") or []
+    evidence = [
+        e for e in raw_evidence
+        if isinstance(e, dict)
+    ]
+
     evidence_context = _format_evidence(evidence)
-    
     revision_count = state.get("revision_count") or 0
+
+    draft = state.get("draft") or ""
+
     if revision_count >= MAX_REVISIONS:
         note = (
             f"FORCE-ACCEPTED after {MAX_REVISIONS} revision cycles. "
-            "Draft was not formally approved — accepted at revision limit to prevent infinite loop. "
+            "Draft was not formally approved — accepted at revision limit "
+            "to prevent infinite loop. "
             "Manual review recommended before using this output."
         )
+
         return {
             "review_notes": note,
-            "final_output": state.get("draft"),
-            "status": "needs_review",   # distinct from "complete"
-            "messages": [{"role": "assistant", "content": f"[reviewer] FORCE-ACCEPTED at revision limit"}],
+            "final_output": draft,
+            "evidence": evidence,
+            "status": "needs_review",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": (
+                        "[reviewer] FORCE-ACCEPTED at revision limit"
+                    ),
+                }
+            ],
         }
 
     prompt = f"""
-    You are an expert reviewer agent. You critically evaluate research drafts for quality,
-    accuracy, and completeness before they are finalized.
+    You are an expert reviewer agent. You critically evaluate research
+    drafts for quality, accuracy, and completeness before they are finalized.
 
-    OVERALL GOAL : {state["task"]}
-    CURRENT TASK : {state["current_step"]}
-    REVISION : {revision_count} of {MAX_REVISIONS} max (auto-approve at limit)
+    OVERALL GOAL:
+    {state.get("task", "")}
+
+    CURRENT TASK:
+    {state.get("current_step", "")}
+
+    REVISION:
+    {revision_count} of {MAX_REVISIONS} max (auto-accept at limit)
 
     MATERIALS TO REVIEW:
-    - Draft : {mask(state.get("draft"), limit=4000) if state.get("draft") else "No draft yet."}
-    - Research summary : {mask(state.get("research_summary"), limit=600)}
-    - Analysis summary : {mask(state.get("analysis_summary"), limit=600)}
-    - Code result : {mask(state.get("code_result"), limit=400)}
-    - Output files : {", ".join(state.get("output_files") or []) or "None."}
-    - Prior notes : {mask(state.get("review_notes"), limit=400) or "None — first review."}
-    
+    - Draft:
+    {mask(draft, limit=4000) if draft else "No draft yet."}
+
+    - Research summary:
+    {mask(state.get("research_summary"), limit=600)}
+
+    - Analysis summary:
+    {mask(state.get("analysis_summary"), limit=600)}
+
+    - Code result:
+    {mask(state.get("code_result"), limit=400)}
+
+    - Output files:
+    {", ".join(state.get("output_files") or []) or "None."}
+
+    - Prior notes:
+    {mask(state.get("review_notes"), limit=400) or "None — first review."}
+
     EVIDENCE AVAILABLE FOR VERIFICATION:
     {evidence_context}
 
@@ -609,36 +648,49 @@ def reviewer(state: State) -> dict:
     - Flag citations to rejected or unverified evidence.
     - Flag factual claims that require evidence but have no citation.
     - Never accept a fabricated evidence ID.
-    
+    - Do not assume that an evidence source supports a claim merely
+    because the source title appears relevant.
+
     CONTEXT:
-    - This is a research summary report, not a peer-reviewed journal submission
-    - Approve if the document is substantially correct, complete, and addresses the task
-    - Only flag genuinely wrong facts or broken logic — not stylistic preferences
-    - Mathematical notation only needs to be internally consistent, not publication-perfect
-    - If the writer addressed the previous revision notes, do not re-flag the same issues
-    - When in doubt, request ONE specific targeted improvement rather than approving a weak draft
-    - Loop prevention is handled by the revision limit in code — do not approve prematurely
-    - Only APPROVE when the document genuinely and completely addresses the task with supported claims
+
+    - This is a research summary report, not a peer-reviewed journal submission.
+    - Approve if the document is substantially correct, complete,
+    and addresses the task.
+    - Only flag genuinely wrong facts, unsupported claims, missing
+    citations, or broken logic — not stylistic preferences.
+    - Mathematical notation only needs to be internally consistent,
+    not publication-perfect.
+    - If the writer addressed previous revision notes, do not re-flag
+    the same issues.
+    - When in doubt, request ONE specific targeted improvement rather
+    than approving a weak draft.
+    - Loop prevention is handled by the revision limit in code.
+    - Only APPROVE when the document genuinely and sufficiently
+    addresses the task with supported claims.
 
     CHECK FOR:
-    1. Unsupported claims — facts not grounded in the research or analysis
-    2. Missing citations — key findings that need sourcing
-    3. Citation evidence mismatch - citations that don't match with claims
-    4. Fabricated evidence IDs or URLs - URLs or Evidences that don't exist
-    5. Logical inconsistencies — conclusions that don't follow from evidence
-    6. Contradictions with code results — claims that conflict with actual outputs
-    7. Completeness — does the draft fully address the original task?
-    8. Clarity — confusing sentences, undefined jargon
 
-    FORMAT — return ONLY a valid JSON object, no other text:
+    1. Unsupported claims — facts not grounded in the research or analysis.
+    2. Missing citations — key findings that need sourcing.
+    3. Citation/evidence mismatch — citations that do not support claims.
+    4. Fabricated evidence IDs or URLs — references that do not exist.
+    5. Logical inconsistencies — conclusions that do not follow from evidence.
+    6. Contradictions with code results — claims that conflict with actual outputs.
+    7. Completeness — whether the draft addresses the original task.
+    8. Clarity — confusing sentences or undefined jargon.
+
+    FORMAT — return ONLY a valid JSON object, no markdown:
+
     {{
         "verdict": "APPROVED" or "NEEDS_REVISION",
         "reasoning": "one paragraph explaining your decision",
         "issues": ["specific issue 1", "specific issue 2"]
     }}
 
-    If verdict is "APPROVED", issues must be an empty list [].
-    If verdict is "NEEDS_REVISION", issues must contain at least one specific, actionable item.
+    If verdict is "APPROVED", issues MUST be [].
+
+    If verdict is "NEEDS_REVISION", issues MUST contain
+    at least one specific, actionable item.
     """
     response = get_llm().generate(prompt, max_output_tokens=8192)
     
@@ -648,58 +700,155 @@ def reviewer(state: State) -> dict:
 
     try:
         review_data = _extract_json(str(response))
-        verdict = review_data.get("verdict", "").upper().strip()
-        
+
+        if not isinstance(review_data, dict):
+            raise ValueError("Reviewer returned invalid JSON object")
+
+        verdict = str(
+            review_data.get("verdict") or ""
+        ).upper().strip()
+
         if verdict == "APPROVED":
-            reasoning = review_data.get("reasoning", "")
-            issues = review_data.get("issues", [])
-            
+            reasoning = str(
+                review_data.get("reasoning") or ""
+            ).strip()
+
+            raw_issues = review_data.get("issues") or []
+
+            if not isinstance(raw_issues, list):
+                raw_issues = [str(raw_issues)]
+
+            issues = [
+                str(issue).strip()
+                for issue in raw_issues
+                if issue is not None and str(issue).strip()
+            ]
+
             if issues:
                 approved = False
-                issues_text = "\n".join(f"{i+1}. {issue}" for i, issue in enumerate(issues))
-                review_notes = f"NEEDS REVISION\n\nContradictory response — verdict was APPROVED but issues were listed:\n{issues_text}"
+
+                issues_text = "\n".join(
+                    f"{i + 1}. {issue}"
+                    for i, issue in enumerate(issues)
+                )
+
+                review_notes = (
+                    "NEEDS REVISION\n\n"
+                    "1. Contradictory reviewer response — verdict was "
+                    "APPROVED but issues were listed:\n"
+                    f"{issues_text}"
+                )
+
             else:
                 approved = True
-                review_notes = f"APPROVED — {reasoning}"
-                
-        elif verdict == "NEEDS_REVISION":
-            issues = review_data.get("issues", [])
-            if not issues:
-                review_notes = "NEEDS REVISION\n\n1. Reviewer indicated revision needed but did not specify issues. Please improve overall quality and resubmit."
-            else:
-                issues_text = "\n".join(f"{i+1}. {issue}" for i, issue in enumerate(issues))
-                review_notes = f"NEEDS REVISION\n\n{issues_text}"
-        else:
-            review_notes = f"NEEDS REVISION\n\n1. Reviewer returned malformed verdict {verdict!r}. Please improve and resubmit."
+                review_notes = (
+                    f"APPROVED — {reasoning}"
+                    if reasoning
+                    else "APPROVED"
+                )
 
-    except json.JSONDecodeError:
-        raw = str(response).strip().upper()
-        if raw.startswith("APPROVED") and "NEEDS" not in raw and len(raw) < 500:
+        elif verdict == "NEEDS_REVISION":
+            raw_issues = review_data.get("issues") or []
+
+            if not isinstance(raw_issues, list):
+                raw_issues = [str(raw_issues)]
+
+            issues = [
+                str(issue).strip()
+                for issue in raw_issues
+                if issue is not None and str(issue).strip()
+            ]
+
+            if not issues:
+                review_notes = (
+                    "NEEDS REVISION\n\n"
+                    "1. Reviewer indicated revision is needed but did "
+                    "not specify an actionable issue. Improve the draft "
+                    "and resubmit."
+                )
+            else:
+                issues_text = "\n".join(
+                    f"{i + 1}. {issue}"
+                    for i, issue in enumerate(issues)
+                )
+
+                review_notes = (
+                    f"NEEDS REVISION\n\n{issues_text}"
+                )
+
+        else:
+            review_notes = (
+                "NEEDS REVISION\n\n"
+                f"1. Reviewer returned malformed verdict {verdict!r}. "
+                "Please improve and resubmit."
+            )
+
+    except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+        raw = str(response).strip()
+        raw_upper = raw.upper()
+
+        if (raw_upper.startswith("APPROVED") and "NEEDS REVISION" not in raw_upper and len(raw) < 500):
             approved = True
-            review_notes = f"APPROVED (fallback) — {str(response)[:200]}"
+            review_notes = (
+                f"APPROVED (fallback) — {raw[:200]}"
+            )
         else:
             approved = False
-            review_notes = f"NEEDS REVISION\n\n1. Reviewer returned unparseable response. Please improve and resubmit."
-    
+            review_notes = (
+                "NEEDS REVISION\n\n"
+                "1. Reviewer returned an unparseable response. "
+                "Please improve and resubmit."
+            )
+
+    final_report = None
+
     if approved:
+        references = _render_references(evidence)
+        final_report = draft
+
+        if references:
+            final_report += "\n\n" + references
+
         fs = FileSystem(project_id=state["project_id"], run_id=state.get("run_id"))
-        final_report = str(state.get("draft")) + "\n\n" + _render_references(state.get("evidence", []))
-        fs.write("outputs/final_report.md", final_report or "") #type: ignore
-        
+
+        fs.write("outputs/final_report.md", final_report)
+
     get_langfuse_client().update_current_span(
         metadata={
-            "verdict": "APPROVED" if approved else "NEEDS_REVISION",
-            "issues_count": str(len(issues) if not approved else 0),
+            "verdict": (
+                "APPROVED"
+                if approved
+                else "NEEDS_REVISION"
+            ),
+            "issues_count": str(
+                len(issues)
+                if not approved
+                else 0
+            ),
             "revision_count": str(revision_count),
-            "draft_length": str(len(state.get("draft") or "")),
+            "draft_length": str(len(draft)),
+            "evidence_count": str(len(evidence)),
         }
     )
 
     return {
         "review_notes": review_notes,
-        "final_output": state.get("draft") if approved else None,
-        "status": "completed" if approved else "running",
-        "messages": [{"role": "assistant", "content": f"[reviewer] {'APPROVED' if approved else 'NEEDS REVISION'}"}],
+        "final_output": final_report if approved else None,
+        "evidence": evidence,
+        "status": (
+            "completed"
+            if approved
+            else "running"
+        ),
+        "messages": [
+            {
+                "role": "assistant",
+                "content": (
+                    "[reviewer] "
+                    f"{'APPROVED' if approved else 'NEEDS REVISION'}"
+                ),
+            }
+        ],
     }
     
 @observe(name="critic", capture_input=False, capture_output=False)
@@ -707,23 +856,35 @@ def critic(state: State) -> dict:
     update_run_agent(str(state["run_id"]), "critic")
     prior = load_project_memory(state["project_id"])
     prior_context = format_prior_memory(prior)
-    
+
     papers = []
     api_error = False
+    evidence = state.get("evidence") or []
+    evidence = [e for e in evidence if e is not None]
 
     try:
-        papers = search_papers(query=str(state["task"]), limit=5)
+        papers = search_papers(
+            query=str(state["task"]),
+            limit=5,
+        )
     except Exception as e:
-        logger.warning("[critic] Semantic Scholar API failed: %s", e)
+        logger.warning(
+            "[critic] Semantic Scholar API failed: %s: %r",
+            type(e).__name__,
+            e,
+        )
         api_error = True
-        
-    evidence = state.get("evidence", [])
+
     paper_evidence_ids = []
+
     for paper in papers:
+        if not paper:
+            continue
+
         item = {
             "source": paper["title"],
             "url": paper.get("url"),
-            "excerpt": paper.get("abstract", "")[:800],
+            "excerpt": (paper.get("abstract") or "")[:800],
         }
 
         key = (
@@ -733,8 +894,13 @@ def critic(state: State) -> dict:
         )
 
         existing_keys = {
-            (e["source"], e.get("url"), e["excerpt"])
+            (
+                e["source"],
+                e.get("url"),
+                e["excerpt"],
+            )
             for e in evidence
+            if e is not None
         }
 
         if key not in existing_keys:
@@ -747,7 +913,8 @@ def critic(state: State) -> dict:
             evidence.append(Evidence(**data))
 
         matching = next(
-            e for e in evidence
+            e
+            for e in evidence
             if (
                 e["source"],
                 e.get("url"),
@@ -755,9 +922,9 @@ def critic(state: State) -> dict:
             ) == key
         )
         paper_evidence_ids.append(matching["id"])
-            
-    evidence_context = _format_evidence(evidence)
 
+    evidence_context = _format_evidence(evidence)
+    
     if api_error:
         report = (
             "Novelty check unavailable — Semantic Scholar API error. "
@@ -767,7 +934,13 @@ def critic(state: State) -> dict:
         return {
             "novelty_report": report,
             "status": "running",
-            "messages": [{"role": "assistant", "content": "[critic] API error — novelty check skipped"}],
+            "evidence": evidence,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "[critic] API error — novelty check skipped",
+                }
+            ],
         }
 
     if not papers:
@@ -780,9 +953,15 @@ def critic(state: State) -> dict:
         return {
             "novelty_report": report,
             "status": "running",
-            "messages": [{"role": "assistant", "content": "[critic] no papers found — novelty unverified"}],
+            "evidence": evidence,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "[critic] no papers found — novelty unverified",
+                }
+            ],
         }
-    
+
     papers_text = "\n\n".join(
         f"[{evidence_id}]\n"
         f"Title: {p['title']}\n"
@@ -790,10 +969,10 @@ def critic(state: State) -> dict:
         f"Citations: {p['citation_count']}\n"
         f"Authors: {p['authors']}\n"
         f"URL: {p['url']}\n"
-        f"Abstract: {p['abstract'][:300]}"
+        f"Abstract: {(p.get('abstract') or '')[:300]}"
         for p, evidence_id in zip(papers, paper_evidence_ids)
     )
-    
+
     prompt = f"""
     You are a research critic agent. Your job is to assess novelty and identify
     how a new research report should differentiate itself from existing work.
@@ -802,10 +981,10 @@ def critic(state: State) -> dict:
 
     SIMILAR EXISTING PAPERS:
     {papers_text}
-    
+
     When making claims about existing papers in the novelty report, cite the corresponding evidence ID [E#].
     Never invent an evidence ID.
-    
+
     Prior Criticism: {prior_context}
 
     Produce a novelty report covering:
@@ -815,7 +994,7 @@ def critic(state: State) -> dict:
     4. Specific differentiation instructions for the writer
 
     Be specific and actionable. The writer will read this report before drafting.
-    
+
     RESEARCH REPORT TO VERIFY:
     {mask(state.get("research_output"), 4000)}
 
@@ -823,76 +1002,128 @@ def critic(state: State) -> dict:
     {evidence_context}
 
     EVIDENCE VERIFICATION:
+    For each evidence item, determine whether it adequately supports the factual
+    claim(s) made from it in the RESEARCH REPORT.
 
-    For each evidence item, determine whether it adequately supports the factual claim(s) made from it in the RESEARCH REPORT.
     Do not determine whether the underlying source is objectively true.
-    Determine only whether the provided excerpt is sufficient and relevant to support the claim attributed to it.
+
+    Determine only whether the provided excerpt is sufficient and relevant to
+    support the claim attributed to it.
+
     Return one review for each evidence item.
 
     Return an evidence_reviews array.
 
-    For each evidence item, determine whether it adequately supports claims made in the research report.
-
     Mark:
-    - "supported" when the evidence directly supports the relevant claim(s) in the research report.
-    - "rejected" when the evidence does not support the claim, is contradictory, or is insufficient.
+    - "supported" when the evidence directly supports the relevant claim(s)
+    - "rejected" when the evidence does not support the claim,
+      is contradictory, or is insufficient
 
     Do not judge whether the source is universally truthful.
-    Judge whether the source excerpt supports the claim being
-    made from it.
 
-    Example:
-    
-    {
+    Judge whether the source excerpt supports the claim being made from it.
+
+    Return ONLY valid JSON:
+    {{
         "novelty_report": "...",
         "evidence_reviews": [
-            {
+            {{
                 "id": "E1",
                 "status": "supported",
                 "reason": "..."
-                },
-                {
+            }},
+            {{
                 "id": "E2",
                 "status": "rejected",
                 "reason": "..."
-            }
+            }}
         ]
-    }
-    
+    }}
     """
     response = get_llm().generate(prompt, max_output_tokens=4096)
-    
+
     critic_result = _extract_json(response)
+    if not isinstance(critic_result, dict):
+        logger.warning(
+            "[critic] Invalid LLM JSON response: %r",
+            critic_result,
+        )
+        
+        return {
+            "novelty_report": (
+                "Novelty assessment failed because the critic returned "
+                "an invalid structured response."
+            ),
+            "status": "running",
+            "evidence": evidence,
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "[critic] invalid JSON response",
+                }
+            ],
+        }
+
     novelty_report = critic_result.get("novelty_report", "")
     evidence_reviews = critic_result.get("evidence_reviews", [])
-    
-    evidence = state.get("evidence", [])
 
-    evidence_by_id = {e["id"]: e for e in evidence}
+    if not isinstance(evidence_reviews, list):
+        evidence_reviews = []
+
+    evidence_by_id = {}
+
+    for e in evidence:
+        if not isinstance(e, dict):
+            logger.warning(
+                "[critic] Ignoring invalid evidence item: %r",
+                e,
+            )
+            continue
+
+        evidence_id = e.get("id")
+
+        if not evidence_id:
+            logger.warning(
+                "[critic] Ignoring evidence without ID: %r",
+                e,
+            )
+            continue
+
+        evidence_by_id[evidence_id] = e
 
     for review in evidence_reviews:
+        if not isinstance(review, dict):
+            continue
+
         evidence_item = evidence_by_id.get(review.get("id"))
 
         if evidence_item is None:
             continue
 
-        if review.get("status") not in {"supported", "rejected"}:
+        status = review.get("status")
+
+        if status not in {"supported", "rejected"}:
             continue
 
-        evidence_item["status"] = review["status"]
+        evidence_item["status"] = status
         evidence_item["reason"] = review.get("reason")
-    
+
     get_langfuse_client().update_current_span(
         metadata={
-            "papers_found": str(len(papers) if papers else 0),
+            "papers_found": str(len(papers)),
             "api_error": str(api_error),
             "task": str(state["task"])[:100],
         }
     )
-    
+
     return {
         "novelty_report": novelty_report,
         "status": "running",
         "evidence": list(evidence_by_id.values()),
-        "messages": [{"role": "assistant", "content": f"[critic] novelty check complete"}],
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "[critic] novelty check complete",
+            }
+        ],
     }
