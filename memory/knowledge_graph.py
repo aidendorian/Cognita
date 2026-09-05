@@ -89,8 +89,12 @@ def add_research_episode(project_id: int, content: str, source: str = "researche
 
     async def _add():
         g = _get_graphiti()
+
         await g.add_episode(
-            name=f"project_{project_id}_{source}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}",
+            name=(
+                f"project_{project_id}_{source}_"
+                f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}"
+            ),
             episode_body=content,
             source=EpisodeType.text,
             reference_time=datetime.now(timezone.utc),
@@ -100,9 +104,16 @@ def add_research_episode(project_id: int, content: str, source: str = "researche
 
     try:
         _run_async(_add())
-        print(f"[graphiti] episode added — project {project_id}, source={source}")
-    except Exception as e:
-        print(f"[graphiti] add_episode failed (non-fatal): {e}")
+        print(f"[graphiti] episode added — "f"project {project_id}, source={source}")
+
+    except Exception:
+        import traceback
+
+        print(
+            f"[graphiti] add_episode failed (non-fatal) — "
+            f"project={project_id}, source={source}"
+        )
+        traceback.print_exc()
 
 def search_knowledge_graph(query: str, project_id: int, num_results: int = 5) -> list[dict]:
     async def _search() -> list:
