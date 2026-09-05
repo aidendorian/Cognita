@@ -91,6 +91,71 @@ def _get_output_files(project_id: int, run_id: str | None = None) -> list[str]:
         return []
     return sorted(str(path.relative_to(root)) for path in output_dir.rglob("*") if path.is_file())
 
+def _verify_evidence(evidence: list, research_output: str) -> list:
+    """
+    Ask the LLM to mark each evidence item as supported or rejected
+    based on whether its excerpt backs up claims in the research output.
+    Runs independently of the novelty check so both summary and paper
+    mode get verified citations.
+    """
+    if not evidence:
+        return evidence
+
+    evidence_context = _format_evidence(evidence)
+
+    prompt = f"""
+    You are a research evidence verifier. For each evidence item below,
+    decide whether its excerpt adequately supports factual claims made
+    in the research report.
+
+    Judge only whether the excerpt is relevant and sufficient to support
+    the claim — not whether the underlying source is universally true.
+
+    RESEARCH REPORT:
+    {mask(research_output, 4000)}
+
+    EVIDENCE:
+    {evidence_context}
+
+    Return ONLY valid JSON — no preamble, no markdown fences:
+    {{
+        "evidence_reviews": [
+            {{"id": "E1", "status": "supported", "reason": "..."}},
+            {{"id": "E2", "status": "rejected",  "reason": "..."}}
+        ]
+    }}
+
+    Return one entry per evidence item. Use only "supported" or "rejected".
+    """
+
+    try:
+        response = get_llm().generate(prompt, max_output_tokens=2048)
+        result = _extract_json(response)
+        reviews = result.get("evidence_reviews", []) if isinstance(result, dict) else []
+    except Exception as e:
+        logger.warning("[_verify_evidence] failed: %s", e)
+        return evidence
+
+    if not isinstance(reviews, list):
+        return evidence
+
+    by_id = {e["id"]: e for e in evidence if isinstance(e, dict) and e.get("id")}
+
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        item = by_id.get(review.get("id"))
+        if item is None:
+            continue
+        status = review.get("status")
+        if status not in {"supported", "rejected"}:
+            continue
+        item["status"] = status
+        item["reason"] = review.get("reason")
+
+    return list(by_id.values())
+
+
 @observe(name="entry", capture_input=False, capture_output=False)
 def entry(state: State) -> dict:
     update_run_agent(str(state["run_id"]), "entry")
@@ -504,6 +569,8 @@ def writer(state: State) -> dict:
     revision_count = (state.get("revision_count") or 0) + 1
     
     evidence = state.get("evidence", [])
+    if evidence and not any(e.get("status") == "supported" for e in evidence):
+        evidence = _verify_evidence(evidence, state.get("research_output") or "")
     evidence_context = _format_evidence([e for e in evidence if e["status"] == "supported"])
     
     current_step = state.get("current_step") or "Write the research report"
@@ -922,10 +989,9 @@ def critic(state: State) -> dict:
             ) == key
         )
         paper_evidence_ids.append(matching["id"])
-
-    evidence_context = _format_evidence(evidence)
     
     if api_error:
+        evidence = _verify_evidence(evidence, state.get("research_output") or "")
         report = (
             "Novelty check unavailable — Semantic Scholar API error. "
             "Proceeding without novelty assessment. "
@@ -944,6 +1010,7 @@ def critic(state: State) -> dict:
         }
 
     if not papers:
+        evidence = _verify_evidence(evidence, state.get("research_output") or "")
         report = (
             "No closely matching papers found in Semantic Scholar. "
             "This may indicate a novel topic, a very specific query, or a search limitation. "
@@ -995,118 +1062,20 @@ def critic(state: State) -> dict:
 
     Be specific and actionable. The writer will read this report before drafting.
 
-    RESEARCH REPORT TO VERIFY:
-    {mask(state.get("research_output"), 4000)}
-
-    EVIDENCE:
-    {evidence_context}
-
-    EVIDENCE VERIFICATION:
-    For each evidence item, determine whether it adequately supports the factual
-    claim(s) made from it in the RESEARCH REPORT.
-
-    Do not determine whether the underlying source is objectively true.
-
-    Determine only whether the provided excerpt is sufficient and relevant to
-    support the claim attributed to it.
-
-    Return one review for each evidence item.
-
-    Return an evidence_reviews array.
-
-    Mark:
-    - "supported" when the evidence directly supports the relevant claim(s)
-    - "rejected" when the evidence does not support the claim,
-      is contradictory, or is insufficient
-
-    Do not judge whether the source is universally truthful.
-
-    Judge whether the source excerpt supports the claim being made from it.
-
-    Return ONLY valid JSON:
+    Return ONLY valid JSON — no preamble, no markdown fences:
     {{
-        "novelty_report": "...",
-        "evidence_reviews": [
-            {{
-                "id": "E1",
-                "status": "supported",
-                "reason": "..."
-            }},
-            {{
-                "id": "E2",
-                "status": "rejected",
-                "reason": "..."
-            }}
-        ]
+        "novelty_report": "..."
     }}
     """
     response = get_llm().generate(prompt, max_output_tokens=4096)
 
-    critic_result = _extract_json(response)
-    if not isinstance(critic_result, dict):
-        logger.warning(
-            "[critic] Invalid LLM JSON response: %r",
-            critic_result,
-        )
-        
-        return {
-            "novelty_report": (
-                "Novelty assessment failed because the critic returned "
-                "an invalid structured response."
-            ),
-            "status": "running",
-            "evidence": evidence,
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": "[critic] invalid JSON response",
-                }
-            ],
-        }
-
-    novelty_report = critic_result.get("novelty_report", "")
-    evidence_reviews = critic_result.get("evidence_reviews", [])
-
-    if not isinstance(evidence_reviews, list):
-        evidence_reviews = []
-
-    evidence_by_id = {}
-
-    for e in evidence:
-        if not isinstance(e, dict):
-            logger.warning(
-                "[critic] Ignoring invalid evidence item: %r",
-                e,
-            )
-            continue
-
-        evidence_id = e.get("id")
-
-        if not evidence_id:
-            logger.warning(
-                "[critic] Ignoring evidence without ID: %r",
-                e,
-            )
-            continue
-
-        evidence_by_id[evidence_id] = e
-
-    for review in evidence_reviews:
-        if not isinstance(review, dict):
-            continue
-
-        evidence_item = evidence_by_id.get(review.get("id"))
-
-        if evidence_item is None:
-            continue
-
-        status = review.get("status")
-
-        if status not in {"supported", "rejected"}:
-            continue
-
-        evidence_item["status"] = status
-        evidence_item["reason"] = review.get("reason")
+    try:
+        critic_result = _extract_json(response)
+        novelty_report = critic_result.get("novelty_report", "") if isinstance(critic_result, dict) else str(response)
+    except Exception:
+        logger.warning("[critic] could not parse novelty JSON, using raw response")
+        novelty_report = str(response)
+    evidence = _verify_evidence(evidence, state.get("research_output") or "")
 
     get_langfuse_client().update_current_span(
         metadata={
@@ -1119,7 +1088,7 @@ def critic(state: State) -> dict:
     return {
         "novelty_report": novelty_report,
         "status": "running",
-        "evidence": list(evidence_by_id.values()),
+        "evidence": evidence,
         "messages": [
             {
                 "role": "assistant",
