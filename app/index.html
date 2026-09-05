@@ -1192,14 +1192,27 @@ async function submitUrl(){
 async function showMemory(){
   if(!selectedProject) return;
   try{
-    const mem=await api('GET',`/projects/${selectedProject.id}/memory`);
-    document.getElementById('memContent').innerHTML=`
+    const mem = await api('GET', `/projects/${selectedProject.id}/memory`);
+    document.getElementById('memContent').innerHTML = `
       <div class="mem-grid">
-        <div class="mem-card"><div class="mem-num">${mem.research_summaries}</div><div class="mem-label">Research summaries</div></div>
-        <div class="mem-card"><div class="mem-num">${mem.analysis_summaries}</div><div class="mem-label">Analysis summaries</div></div>
-        <div class="mem-card"><div class="mem-num">${mem.prior_reports}</div><div class="mem-label">Prior reports</div></div>
-        <div class="mem-card"><div class="mem-num">${mem.critic_reports??0}</div><div class="mem-label">Critic reports</div></div>
-      </div>`;
+        <div class="mem-card"><div class="mem-num">${mem.research_summaries}</div><div class="mem-label">Research snapshot</div></div>
+        <div class="mem-card"><div class="mem-num">${mem.analysis_summaries}</div><div class="mem-label">Analysis snapshot</div></div>
+        <div class="mem-card"><div class="mem-num">${mem.prior_reports}</div><div class="mem-label">Prior report</div></div>
+        <div class="mem-card"><div class="mem-num">${mem.critic_reports ?? 0}</div><div class="mem-label">Critic report</div></div>
+      </div>
+      ${mem.most_recent_research ? `
+        <div style="margin-top:14px;">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:6px;font-weight:500;">LATEST RESEARCH MEMORY</div>
+          <div style="font-size:12px;line-height:1.7;color:var(--muted2);background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px;">${escHtml(mem.most_recent_research)}…</div>
+        </div>` : ''}
+      ${mem.most_recent_analysis ? `
+        <div style="margin-top:10px;">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:6px;font-weight:500;">LATEST ANALYSIS MEMORY</div>
+          <div style="font-size:12px;line-height:1.7;color:var(--muted2);background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px;">${escHtml(mem.most_recent_analysis)}…</div>
+        </div>` : ''}
+      ${!mem.most_recent_research && !mem.most_recent_analysis ? `
+        <div style="margin-top:12px;font-size:12px;color:var(--muted);text-align:center;padding:16px 0;">No memory yet — run a task to populate it.</div>` : ''}
+    `;
     openModal('modalMemory');
   }catch(e){ toast('Could not load memory','err'); }
 }

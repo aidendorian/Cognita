@@ -628,6 +628,7 @@ async def get_memory(request: Request, project_id: int, api_key: str = Depends(v
         "research_summaries": len(prior["research_summaries"]),
         "analysis_summaries": len(prior["analysis_summaries"]),
         "prior_reports": len(prior["prior_reports"]),
+        "critic_reports": len(prior["critic_reports"]),
         "most_recent_research": (
             prior["research_summaries"][-1][:300]
             if prior["research_summaries"]
