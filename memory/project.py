@@ -2,18 +2,42 @@ import psycopg
 from config.env import db_url
 from graphs.state import State
 
+MAX_SUMMARIES_PER_AGENT = 5
+
+def _prune_oldest(cur, project_id: int, agent: str) -> None:
+    """Delete the oldest row for this agent if we're at the cap."""
+    cur.execute(
+        "SELECT COUNT(*) FROM summaries WHERE project_id = %s AND agent = %s",
+        (project_id, agent),
+    )
+    count = cur.fetchone()[0]
+    if count >= MAX_SUMMARIES_PER_AGENT:
+        cur.execute(
+            """
+            DELETE FROM summaries
+            WHERE id = (
+                SELECT id FROM summaries
+                WHERE project_id = %s AND agent = %s
+                ORDER BY created_at ASC
+                LIMIT 1
+            )
+            """,
+            (project_id, agent),
+        )
+
 def save_project_memory(project_id: int, state: State) -> None:
 
-    to_save = [("researcher", state.get("research_summary"), state.get("research_output")),("analyst", state.get("analysis_summary"), state.get("analysis")), ("critic", state.get("novelty_report"), state.get("novelty_report"))]
+    to_save = [
+        ("researcher", state.get("research_summary"), state.get("research_output")),
+        ("analyst",    state.get("analysis_summary"), state.get("analysis")),
+        ("critic",     state.get("novelty_report"),   state.get("novelty_report")),
+    ]
 
     with psycopg.connect(db_url) as conn:
         with conn.cursor() as cur:
             for agent, summary, raw in to_save:
                 if summary:
-                    cur.execute(
-                        "DELETE FROM summaries WHERE project_id = %s AND agent = %s",
-                        (project_id, agent),
-                    )
+                    _prune_oldest(cur, project_id, agent)
                     cur.execute(
                         """
                         INSERT INTO summaries (project_id, agent, content, raw_length)
@@ -23,10 +47,7 @@ def save_project_memory(project_id: int, state: State) -> None:
                     )
 
             if state.get("final_output"):
-                cur.execute(
-                    "DELETE FROM summaries WHERE project_id = %s AND agent = %s",
-                    (project_id, "writer"),
-                )
+                _prune_oldest(cur, project_id, "writer")
                 cur.execute(
                     """
                     INSERT INTO summaries (project_id, agent, content, raw_length)
