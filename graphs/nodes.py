@@ -1,7 +1,7 @@
 import json
 from rag.retriever import retrieve
 from graphs.state import State
-from config.llm import mask
+from config.llm import mask, mask_tail
 from tools.filesystem import FileSystem
 from memory.project import load_project_memory
 from memory.summaries import format_prior_memory
@@ -38,6 +38,11 @@ def get_langfuse_client():
 
 VALID_AGENTS = {"researcher", "coder", "analyst", "critic", "end"}
 MAX_REVISIONS = 3
+EVIDENCE_VERIFICATION_REPORT_LIMIT = 12000
+PRIOR_RESEARCH_CONTEXT_LIMIT = 4000
+RESEARCH_HISTORY_MAX_CHARS = 16000
+WRITER_RESEARCH_CONTEXT_LIMIT = RESEARCH_HISTORY_MAX_CHARS
+WRITER_ANALYSIS_CONTEXT_LIMIT = 6000
 
 def _multi_retrieve(queries: list[str], project_id: int, top_k: int = 5) -> list[dict]:
     seen = set()
@@ -112,7 +117,7 @@ def _verify_evidence(evidence: list, research_output: str) -> list:
     the claim — not whether the underlying source is universally true.
 
     RESEARCH REPORT:
-    {mask(research_output, 4000)}
+    {mask(research_output, EVIDENCE_VERIFICATION_REPORT_LIMIT)}
 
     EVIDENCE:
     {evidence_context}
@@ -129,7 +134,7 @@ def _verify_evidence(evidence: list, research_output: str) -> list:
     """
 
     try:
-        response = get_llm().generate(prompt, max_output_tokens=2048)
+        response = get_llm().generate(prompt, max_output_tokens=4096)
         result = _extract_json(response)
         reviews = result.get("evidence_reviews", []) if isinstance(result, dict) else []
     except Exception as e:
@@ -154,6 +159,32 @@ def _verify_evidence(evidence: list, research_output: str) -> list:
         item["reason"] = review.get("reason")
 
     return list(by_id.values())
+
+
+def _validate_citations(text: str, evidence: list) -> list[str]:
+    if not text:
+        return []
+
+    cited_ids = sorted(set(re.findall(r"\[E(\d+)\]", text)), key=int)
+    if not cited_ids:
+        return []
+
+    by_id = {
+        e["id"]: e for e in evidence
+        if isinstance(e, dict) and e.get("id")
+    }
+
+    issues = []
+    for num in cited_ids:
+        eid = f"E{num}"
+        item = by_id.get(eid)
+        if item is None:
+            issues.append(f"Citation [{eid}] does not correspond to any known evidence item.")
+        elif item.get("status") != "supported":
+            issues.append(
+                f"Citation [{eid}] refers to evidence marked '{item.get('status')}', not 'supported'."
+            )
+    return issues
 
 
 @observe(name="entry", capture_input=False, capture_output=False)
@@ -256,12 +287,6 @@ def planner(state: State) -> dict:
     else:
         next_agent = llm_agent
 
-    if llm_agent not in VALID_AGENTS:
-        logger.warning("[planner] invalid agent %r — routing to end", llm_agent)
-        next_agent = "end"
-    else:
-        next_agent = llm_agent
-
     if next_agent == "end" and not state.get("research_summary"):
         logger.warning("[planner] end with no research — overriding to researcher")
         next_agent = "researcher"
@@ -347,7 +372,7 @@ def researcher(state: State) -> dict:
     {web_context}
 
     PRIOR RESEARCH (build on this, do not repeat it):
-    {mask(state.get("research_output"), limit=1000)}
+    {mask_tail(state.get("research_output"), limit=PRIOR_RESEARCH_CONTEXT_LIMIT)}
     
     ACCUMULATED KNOWLEDGE FROM PRIOR SESSIONS:
     {prior_context if prior_context else "No prior sessions yet — this is the first run."}
@@ -378,7 +403,14 @@ def researcher(state: State) -> dict:
     """
     response = get_llm().generate(prompt, max_output_tokens=5000)
     summary = mask(str(response), limit=1500)
-    
+    prior_output = state.get("research_output") or ""
+    if prior_output:
+        accumulated = f"{prior_output}\n\n---\n\n{response}"
+    else:
+        accumulated = str(response)
+    if len(accumulated) > RESEARCH_HISTORY_MAX_CHARS:
+        accumulated = accumulated[-RESEARCH_HISTORY_MAX_CHARS:]
+
     get_langfuse_client().update_current_span(
         metadata={
             "project_id": str(state["project_id"]),
@@ -386,8 +418,9 @@ def researcher(state: State) -> dict:
             "task": str(state["task"])[:100],
             "chunks_retrieved": str(len(chunks)),
             "web_results": str(len(search_results)),
-            "has_prior_research": str(bool(state.get("research_output"))),
+            "has_prior_research": str(bool(prior_output)),
             "response_length": str(len(str(response))),
+            "accumulated_length": str(len(accumulated)),
         }
     )
 
@@ -399,7 +432,7 @@ def researcher(state: State) -> dict:
     )
 
     return {
-        "research_output": response,
+        "research_output": accumulated,
         "research_summary": summary,
         "evidence": evidence,
         "status": "running",
@@ -521,7 +554,7 @@ def analyst(state: State) -> dict:
     CURRENT TASK : {state["current_step"]}
 
     INPUTS TO ANALYZE:
-    - Full research findings : {mask(state.get("research_output"), limit=2000)}
+    - Full research findings : {mask_tail(state.get("research_output"), limit=2000)}
     - Code execution result : {mask(state.get("code_result"), limit=800)}
     - Previous analysis : {mask(state.get("analysis"), limit=800)}
     - CSV data files: {csv_content or "None."}
@@ -563,17 +596,44 @@ def analyst(state: State) -> dict:
         "status": "running",
         "messages": [{"role": "assistant", "content": f"[analyst] {summary}"}],
     }
+    
 @observe(name="writer", capture_input=False, capture_output=False)
 def writer(state: State) -> dict:
     update_run_agent(str(state["run_id"]), "writer")
     revision_count = (state.get("revision_count") or 0) + 1
-    
+
     evidence = state.get("evidence", [])
-    if evidence and not any(e.get("status") == "supported" for e in evidence):
-        evidence = _verify_evidence(evidence, state.get("research_output") or "")
-    evidence_context = _format_evidence([e for e in evidence if e["status"] == "supported"])
-    
+    evidence_context = _format_evidence(evidence)
+
     current_step = state.get("current_step") or "Write the research report"
+    
+    if state.get("task_mode") == "paper":
+        structure_instructions = """
+        PAPER MODE — THIS IS AN ACADEMIC RESEARCH PAPER.
+
+        The document MUST contain these sections in this order where applicable:
+
+        - Title
+        - Abstract
+        - Introduction
+        - Related Work
+        - Methodology
+        - Results
+        - Discussion
+        - Conclusion
+        - References
+        
+        Use the supplied evidence to construct the references.
+        Give each section sufficint depth and quality content.
+        Do not write this as a short summary or executive report.
+        """
+    else:
+        structure_instructions = """
+    SUMMARY MODE — produce a concise research report.
+    Use headings appropriate to the task. Do not force academic-paper
+    sections unless they are useful for the task.
+    """
+    
     prompt = f"""
     You are an expert research writing agent. You produce clear, well-structured,
     original research documents in markdown format.
@@ -583,8 +643,8 @@ def writer(state: State) -> dict:
     REVISION : {revision_count} of {MAX_REVISIONS} allowed
 
     CONTENT TO DRAW FROM:
-    - Research summary : {mask(state.get("research_summary"), limit=1000)}
-    - Analysis summary : {mask(state.get("analysis_summary"), limit=1000)}
+    - Research findings : {mask_tail(state.get("research_output") or state.get("research_summary"), limit=WRITER_RESEARCH_CONTEXT_LIMIT)}
+    - Analysis : {mask(state.get("analysis") or state.get("analysis_summary"), limit=WRITER_ANALYSIS_CONTEXT_LIMIT)}
     - Code result : {mask(state.get("code_result"), limit=600)}
     - Output files : {", ".join(state.get("output_files") or []) or "None."}
     - Previous draft : {state.get("draft") or "None yet."}
@@ -595,7 +655,6 @@ def writer(state: State) -> dict:
     CITATION RULES:
     - Cite substantive factual claims using [E#].
     - Only cite evidence provided in the evidence context.
-    - Only use evidence marked supported.
     - Never invent evidence IDs.
     - A citation must directly support the claim it follows.
     - Do not generate a References section.
@@ -612,9 +671,14 @@ def writer(state: State) -> dict:
     - Reference output files by name where relevant
     - Use clear headings, subheadings, bullet points or tables
     
+    Structure Instrcutions
+    {structure_instructions}
+    
     Return ONLY valid markdown. No preamble, no commentary outside the document.
     """
     response = get_llm().generate(prompt)
+    evidence = _verify_evidence(evidence, str(response))
+
     fs = FileSystem(project_id=state["project_id"], run_id=state.get("run_id"))
     filename = f"outputs/draft_v{revision_count}.md"
     fs.write(filename, str(response))
@@ -625,15 +689,18 @@ def writer(state: State) -> dict:
             "draft_length": str(len(str(response))),
             "has_reviewer_feedback": str(bool(state.get("review_notes"))),
             "filename": str(filename),
+            "evidence_supported": str(sum(1 for e in evidence if e.get("status") == "supported")),
         }
     )
     
     return {
         "draft": response,
+        "evidence": evidence,
         "revision_count": revision_count,
         "status": "running",
         "messages": [{"role": "assistant", "content": f"[writer] draft revision {revision_count} complete — saved to {filename}"}],
     }
+
 
 @observe(name="reviewer", capture_input=False, capture_output=False)
 def reviewer(state: State) -> dict:
@@ -657,10 +724,21 @@ def reviewer(state: State) -> dict:
             "to prevent infinite loop. "
             "Manual review recommended before using this output."
         )
+        if any(e.get("status") == "unverified" for e in evidence):
+            evidence = _verify_evidence(evidence, draft)
+        references = _render_references(evidence)
+        final_report = draft + (f"\n\n{references}" if references else "")
+
+        citation_issues = _validate_citations(draft, evidence)
+        if citation_issues:
+            note += " Unresolved citation issues: " + "; ".join(citation_issues)
+
+        fs = FileSystem(project_id=state["project_id"], run_id=state.get("run_id"))
+        fs.write("outputs/final_report.md", final_report)
 
         return {
             "review_notes": note,
-            "final_output": draft,
+            "final_output": final_report,
             "evidence": evidence,
             "status": "needs_review",
             "messages": [
@@ -673,6 +751,8 @@ def reviewer(state: State) -> dict:
             ],
         }
 
+    task_mode = state.get("task_mode") or "summary"
+
     prompt = f"""
     You are an expert reviewer agent. You critically evaluate research
     drafts for quality, accuracy, and completeness before they are finalized.
@@ -682,6 +762,16 @@ def reviewer(state: State) -> dict:
 
     CURRENT TASK:
     {state.get("current_step", "")}
+
+    TASK MODE: {task_mode} (summary = concise report; paper = full academic paper)
+    {"This is a PAPER-mode task. Hold it to academic standards: check that "
+     "claims of originality are actually backed by the novelty report below, "
+     "flag missing methodology/limitations discussion, and expect a more "
+     "rigorous citation standard than a summary report would need."
+     if task_mode == "paper" else
+     "This is a SUMMARY-mode task — a concise report, not a peer-reviewed "
+     "paper. Do not require academic-paper structure (methodology sections, "
+     "formal literature review, etc.) that wasn't asked for."}
 
     REVISION:
     {revision_count} of {MAX_REVISIONS} max (auto-accept at limit)
@@ -695,6 +785,9 @@ def reviewer(state: State) -> dict:
 
     - Analysis summary:
     {mask(state.get("analysis_summary"), limit=600)}
+
+    - Novelty report (paper mode only):
+    {mask(state.get("novelty_report"), limit=600) or "None — not applicable in summary mode."}
 
     - Code result:
     {mask(state.get("code_result"), limit=400)}
@@ -720,7 +813,10 @@ def reviewer(state: State) -> dict:
 
     CONTEXT:
 
-    - This is a research summary report, not a peer-reviewed journal submission.
+    {"- This is a paper-mode task — hold it to the standard of a research "
+     "paper, not a casual summary."
+     if task_mode == "paper" else
+     "- This is a research summary report, not a peer-reviewed journal submission."}
     - Approve if the document is substantially correct, complete,
     and addresses the task.
     - Only flag genuinely wrong facts, unsupported claims, missing
@@ -867,6 +963,21 @@ def reviewer(state: State) -> dict:
                 "Please improve and resubmit."
             )
 
+    # Deterministic safety net: the reviewer prompt asks the LLM to validate
+    # citation IDs, but nothing in code actually checks them. Cross-check
+    # every [E#] in the draft against evidence directly and override an
+    # APPROVED verdict if the LLM missed a fabricated or unsupported citation.
+    citation_issues = _validate_citations(draft, evidence)
+    if citation_issues and approved:
+        approved = False
+        issues_text = "\n".join(f"{i + 1}. {issue}" for i, issue in enumerate(citation_issues))
+        review_notes = (
+            "NEEDS REVISION\n\n"
+            "Deterministic citation check found problems the reviewer missed:\n"
+            f"{issues_text}"
+        )
+        issues = citation_issues
+
     final_report = None
 
     if approved:
@@ -895,6 +1006,7 @@ def reviewer(state: State) -> dict:
             "revision_count": str(revision_count),
             "draft_length": str(len(draft)),
             "evidence_count": str(len(evidence)),
+            "task_mode": task_mode,
         }
     )
 

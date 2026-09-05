@@ -26,6 +26,13 @@ def mask(text: str | None, limit: int = 1500) -> str:
         return text
     return text[:limit] + f"\n[...{len(text) - limit} chars omitted — full content in state]"
 
+def mask_tail(text: str | None, limit: int = 1500) -> str:
+    if not text:
+        return "None yet."
+    if len(text) <= limit:
+        return text
+    return f"[...{len(text) - limit} earlier chars omitted...]\n" + text[-limit:]
+
 class LLMBackend(ABC):
     @abstractmethod
     def generate(self, prompt: str, max_output_tokens: int = 8192, **kwargs) -> str:
