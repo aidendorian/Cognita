@@ -135,15 +135,15 @@ The planner decides routing at every step by reading the full current state (wha
 
 ## Agents — What Each One Does
 
-### entry
+### Entry
 Initialises the run. Adds the user's task to the message history and resets `revision_count` to 0. Runs once at the start of every run.
 
-### planner
+### Planner
 The brain of the pipeline. Reads the full state and decides which agent to call next. Derives `task_mode` (`summary` or `paper`) from the task text — if the task contains words like "paper", "academic", "publish", or "write up", it routes to paper mode, which includes a novelty check via the critic before writing begins.
 
 Guards against bad routing: if it tries to route to `end` with no research done yet, it is overridden to `researcher`.
 
-### researcher
+### Researcher
 The primary information-gathering agent. On each call it:
 
 1. Retrieves relevant chunks from the project's vector store using hybrid search (vector + BM25, fused with Reciprocal Rank Fusion).
@@ -153,13 +153,13 @@ The primary information-gathering agent. On each call it:
 5. Synthesises all of the above into a research report with inline citations (`[E1]`, `[E2]`, etc.).
 6. Appends the result to the Graphiti knowledge graph as an episode for future runs to use.
 
-### coder
+### Coder
 Writes Python code to answer the current step, then executes it in the Docker sandbox. On failure it retries up to 3 times, feeding the error back into a fix prompt each time. Available libraries: `pandas`, `numpy`, `matplotlib`, `seaborn`, `scipy`, `scikit-learn`, `pytest`. Output files are saved to `outputs/` inside the run directory. The sandbox is network-isolated, read-only except for `outputs/` and a `workspace/` temp dir, capped at 512 MB RAM, 1 CPU, 100 PIDs, and a 240-second timeout.
 
-### analyst
+### Analyst
 Interprets the research output and any code results. Reads CSV files from `outputs/` directly to analyse data that the coder produced. Produces patterns, insights, gap analysis, and concrete recommendations for the writer. Also appends its output to the Graphiti knowledge graph.
 
-### critic
+### Critic
 Paper-mode only (routed there by the planner when `task_mode=paper` and no `novelty_report` yet). Does two independent jobs:
 
 1. **Novelty assessment** — searches Semantic Scholar for up to 5 similar papers, adds them as evidence items, and produces a novelty report comparing the task to existing literature.
@@ -167,10 +167,10 @@ Paper-mode only (routed there by the planner when `task_mode=paper` and no `nove
 
 Both the API-error and no-papers early-return paths also call `_verify_evidence()` so citations are never silently dropped.
 
-### writer
+### Writer
 Produces the draft report in Markdown. Filters evidence to `supported`-only before building the evidence context. If no evidence has been verified yet (i.e. summary mode — the critic never ran), it calls `_verify_evidence()` itself before writing, ensuring citations always work regardless of mode. Saves each draft to `outputs/draft_v{n}.md`. Does not generate a References section — that is appended by the reviewer on approval.
 
-### reviewer
+### Reviewer
 Critically evaluates the draft against the evidence, research summary, analysis, and code results. Returns a structured JSON verdict (`APPROVED` / `NEEDS_REVISION`) with specific, actionable issues. Catches contradictory responses (APPROVED + non-empty issues list) and treats them as revision requests. Falls back to plain-text parsing if JSON is malformed. On approval, appends the rendered references block to the final report and writes it to disk.
 
 ---
