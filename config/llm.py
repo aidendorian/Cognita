@@ -2,9 +2,13 @@ import time
 from abc import ABC, abstractmethod
 from google.genai import Client
 from google.genai.types import GenerateContentConfig
-from config.env import api_key, llm_model, llm_backend
+from config.env import api_key, llm_model, llm_backend, open_router_api_key, open_router_model
 from observability.tracing import trace_llm_call
+from openai import OpenAI
 import httpx
+import logging
+
+logger = logging.getLogger("ResearchAgent")
 
 RETRYABLE_EXCEPTIONS = (
     TimeoutError,
@@ -96,18 +100,63 @@ class LlamaServerBackend(LLMBackend):
         
         return text
 
+class OpenRouterBackend(LLMBackend):
+    def __init__(self):
+        
+        self._client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=open_router_api_key)
+        self._model = open_router_model
+
+    def generate(self, prompt: str, max_output_tokens: int = 8192, **kwargs) -> str:
+        response = self._client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            max_tokens=max_output_tokens,
+        )
+
+        if not response.choices:
+            logger.error("LLM response: %r", response)
+            raise RuntimeError(f"LLM returned no choices: {response!r}")
+
+        content = response.choices[0].message.content
+
+        if content is None:
+            logger.error("LLM choice has no content: %r", response)
+            raise RuntimeError(f"LLM returned no message content: {response!r}")
+
+        trace_llm_call(
+            name="openrouter.generate",
+            prompt=prompt,
+            response=content,
+            model=self._model,
+            metadata={
+                "max_output_tokens": max_output_tokens,
+            },
+        )
+        return content
+
 class LLM:
     def __init__(self):
         target = llm_backend
 
-        if target == "hosted":
+        if target == "gemini":
             print("Gemini")
             self._backend: LLMBackend = GeminiBackend()
+
+        elif target == "openrouter":
+            print("OpenRouter")
+            self._backend = OpenRouterBackend()
+
         elif target == "local":
-            print("")
+            print("Llama.cpp")
             self._backend = LlamaServerBackend()
+
         else:
-            raise ValueError(f"Unknown LLM_BACKEND: {target!r} — must be 'hosted' or 'local'")
+            raise ValueError(f"Unknown LLM_BACKEND: {target} — must be 'hosted', 'openrouter', or 'local'")
 
     def generate(self, prompt: str, retries: int = 3, max_output_tokens: int = 8192) -> str:  # type: ignore
         for attempt in range(retries):
@@ -126,7 +175,7 @@ class LLM:
 
                 if not is_retryable or attempt == retries - 1:
                     raise
-                wait = 2 ** attempt
+                wait = 15 * attempt
                 print(f"[LLM] attempt {attempt + 1} failed ({type(e).__name__}: {e}), retrying in {wait}s...")
                 time.sleep(wait)
 
@@ -140,5 +189,4 @@ class LLM:
         Content:
         {content}
         """
-        
         return self.generate(prompt, max_output_tokens=2000)

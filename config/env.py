@@ -23,6 +23,8 @@ class ValidateENV(BaseSettings):
     fastapi_api_key: str = Field(..., validation_alias="FASTAPI_API_KEY", min_length=1)
     reranker_top_k: int = Field(5, validation_alias="RERANKER_TOP_K", ge=1)
     enable_reranker: bool = Field(False, validation_alias="ENABLE_RERANKER")
+    open_router_api_key: str = Field(..., validation_alias="OPEN_ROUTER_API_KEY", min_length=1)
+    open_router_model: str = Field(..., validation_alias="OPEN_ROUTER_MODEL", min_length=1)
     
     def db_url(self) -> str:
         return f"postgresql://{self.db_username}:{self.db_password}@{self.db_host}:5432/{self.db_name}"
@@ -57,3 +59,5 @@ db_host = validate.db_host
 fastapi_api_key = validate.fastapi_api_key
 reranker_top_k = validate.reranker_top_k
 enable_reranker = validate.enable_reranker
+open_router_api_key = validate.open_router_api_key
+open_router_model = validate.open_router_model
