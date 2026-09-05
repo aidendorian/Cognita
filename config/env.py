@@ -16,7 +16,7 @@ class ValidateENV(BaseSettings):
     langfuse_public_key: str = Field(..., validation_alias="LANGFUSE_PUBLIC_KEY", min_length=1)
     langfuse_secret_key: str = Field(..., validation_alias="LANGFUSE_SECRET_KEY", min_length=1)
     langfuse_base_url: str = Field(..., validation_alias="LANGFUSE_BASE_URL", min_length=1)
-    neo4j_uri: str = Field("bolt://localhost:7687", validation_alias="NEO4J_URI")
+    neo4j_uri: str = Field("bolt://localhost:17687", validation_alias="NEO4J_URI")
     neo4j_user: str = Field("neo4j", validation_alias="NEO4J_USER")
     neo4j_password: str = Field(..., validation_alias="NEO4J_PASSWORD", min_length=1)
     db_host: str = Field("localhost", validation_alias="DATABASE_HOST")

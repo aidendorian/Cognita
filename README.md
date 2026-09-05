@@ -78,7 +78,7 @@ All variables are validated at startup via Pydantic. The server refuses to start
 | `DATABASE_PASSWORD` | ✓ | Postgres password |
 | `DATABASE_NAME` | ✓ | Postgres database name |
 | `DATABASE_HOST` | – | Defaults to `localhost` |
-| `NEO4J_URI` | – | Defaults to `bolt://localhost:7687` |
+| `NEO4J_URI` | – | Defaults to `bolt://localhost:17687` |
 | `NEO4J_USER` | – | Defaults to `neo4j` |
 | `NEO4J_PASSWORD` | ✓ | Neo4j password |
 | `LANGFUSE_PUBLIC_KEY` | ✓ | Langfuse project public key |
